@@ -24,6 +24,8 @@ I preferentially load a fp16 version of the T5 model. Fall back is to the full m
 I can generate using all models, though the 2K model does hit shared memory a lot, so is significantly slower.
 
 ---
+prompt: portrait photograph, woman with red hair, wearing green blazer over yellow tshirt and blue trousers, on sunny beach with dark clouds on horizon
+
 ![portrait photograph, woman with red hair, wearing green blazer over yellow tshirt and blue trousers, on sunny beach with dark clouds on horizon](example.png "20 steps with 1024 model")
 
 ---

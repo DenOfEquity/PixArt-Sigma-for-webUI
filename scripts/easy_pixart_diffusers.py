@@ -15,9 +15,14 @@ torch.backends.cuda.enable_mem_efficient_sdp(True)
 
 
 lastSeed = -1
+galleryIndex = 0
 
 
-from diffusers import PixArtSigmaPipeline, Transformer2DModel, DEISMultistepScheduler, DPMSolverMultistepScheduler
+from diffusers import PixArtSigmaPipeline, Transformer2DModel
+from diffusers import DEISMultistepScheduler, DPMSolverSinglestepScheduler, DPMSolverMultistepScheduler, EulerDiscreteScheduler
+from diffusers import EulerAncestralDiscreteScheduler, UniPCMultistepScheduler
+
+
 import argparse
 import pathlib
 from pathlib import Path
@@ -35,24 +40,25 @@ def quote(text):
     return json.dumps(text, ensure_ascii=False)
 
 # modules/processing.py
-def create_infotext(positive_prompt, negative_prompt, guidance_scale, steps, seed, width, height):
+def create_infotext(positive_prompt, negative_prompt, guidance_scale, steps, seed, scheduler, width, height):
     generation_params = {
-        "Model": "PixArtSigma",
         "Size": f"{width}x{height}",
         "Seed": seed,
+        "Scheduler": scheduler,
         "Steps": steps,
         "CFG": guidance_scale,
         "RNG": opts.randn_source if opts.randn_source != "GPU" else None
     }
 
+#   should save actual model
+    prompt_text = f"Prompt: {positive_prompt}\n"
+    if negative_prompt != "":
+        prompt_text += (f"Negative: {negative_prompt}\n")
     generation_params_text = ", ".join([k if k == v else f'{k}: {quote(v)}' for k, v in generation_params.items() if v is not None])
 
-    prompt_text = positive_prompt
-    negative_prompt_text = f"\nNegative prompt: {negative_prompt}" if negative_prompt else ""
+    return f"Model: PixArtSigma\n{prompt_text}{generation_params_text}"
 
-    return f"{prompt_text}{negative_prompt_text}\n{generation_params_text}".strip()
-
-def predict(positive_prompt, negative_prompt, model, width, height, guidance_scale, num_steps, sampling_seed, num_images, *args):
+def predict(positive_prompt, negative_prompt, model, width, height, guidance_scale, num_steps, sampling_seed, num_images, scheduler, *args):
 
     gc.collect()
     torch.cuda.empty_cache()
@@ -61,8 +67,6 @@ def predict(positive_prompt, negative_prompt, model, width, height, guidance_sca
     global lastSeed
     lastSeed = fixed_seed
 
-    scheduler_type = 'DPM'#'deis'#'DPM'#args.scheduler
-    karras = True#args.karras
 
 #    algorithm_type = args.algorithm
 #    beta_schedule = args.beta_schedule
@@ -96,6 +100,7 @@ def predict(positive_prompt, negative_prompt, model, width, height, guidance_sca
 #        text_encoder.to(torch.float16)
 #        text_encoder.save_pretrained(f"pixart_sigma_sdxlvae_T5_diffusers_fp16", cache_dir=".//models//diffusers//", variant="fp16", safe_serialization=True)
 
+
     
     pipe = PixArtSigmaPipeline.from_pretrained(
         "PixArt-alpha/pixart_sigma_sdxlvae_T5_diffusers",
@@ -104,6 +109,7 @@ def predict(positive_prompt, negative_prompt, model, width, height, guidance_sca
         transformer=None,
         torch_dtype=torch.float16,
     )
+    pipe.enable_attention_slicing("max")    #win at start of loading, costs at end?, reduces gap to fp16 version
 
     with torch.no_grad():
         prompt = positive_prompt
@@ -120,22 +126,35 @@ def predict(positive_prompt, negative_prompt, model, width, height, guidance_sca
     pipe.transformer = Transformer2DModel.from_pretrained(model,
                                                           local_files_only=False, cache_dir=".//models//diffusers//",
                                                           subfolder='transformer',
-                                                          torch_dtype=torch.float16)
+                                                          torch_dtype=torch.float16,
+                                                          low_cpu_mem_usage=False,
+                                                          device_map=None,)
+    #   also save 16bit models here? not so important
     pipe.to('cuda')
     pipe.enable_model_cpu_offload()
     
-    generator = torch.Generator()
-    generator = generator.manual_seed(fixed_seed)
+    generator = [torch.Generator().manual_seed(fixed_seed+i) for i in range(num_images)]
 
     prompt_embeds = prompt_embeds.to('cuda').to(torch.float16)
     negative_embeds = negative_embeds.to('cuda').to(torch.float16)
     prompt_attention_mask = prompt_attention_mask.to('cuda').to(torch.float16)
     negative_prompt_attention_mask = negative_prompt_attention_mask.to('cuda').to(torch.float16)
 
-    if scheduler_type == 'deis':
+    if scheduler == 'DEIS':
         pipe.scheduler = DEISMultistepScheduler.from_config(pipe.scheduler.config)
-    else:
+    elif scheduler == 'DPM':
         pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
+    elif scheduler == 'DPMsinglestep':
+        pipe.scheduler = DPMSolverSinglestepScheduler.from_config(pipe.scheduler.config)
+    elif scheduler == 'Euler':
+        pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config)
+    elif scheduler == 'Euler A':
+        pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
+    elif scheduler == 'UniPC':
+        pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
+
+
+#   else uses default set by model
 
 ##    pipe.scheduler.beta_schedule  = beta_schedule
 ##    pipe.scheduler.algorithm_type = algorithm_type
@@ -157,12 +176,14 @@ def predict(positive_prompt, negative_prompt, model, width, height, guidance_sca
         generator=generator,
     ).images
 
+    del pipe
 
-##    with torch.no_grad():
-##        images = pipe.vae.decode(output / pipe.vae.config.scaling_factor, return_dict=False)[0]
-##        images = pipe.image_processor.postprocess(images, output_type="pil")
+    result = []
 
     for image in output:
+        info=create_infotext(prompt, negative_prompt, guidance_scale, num_steps, fixed_seed, scheduler, width, height)
+        result.append((image, info))
+        
         images.save_image(
             image,
             opts.outdir_samples or opts.outdir_txt2img_samples,
@@ -170,19 +191,35 @@ def predict(positive_prompt, negative_prompt, model, width, height, guidance_sca
             fixed_seed,
             prompt,
             opts.samples_format,
-            info=create_infotext(prompt, negative_prompt, guidance_scale, num_steps, fixed_seed, width, height)
+            info
         )
+        fixed_seed += 1
 
-    return output
+    return result
 
 
 
 def on_ui_tabs():
+    models_list = ["PixArt-alpha/PixArt-Sigma-XL-2-256x256",
+                   "PixArt-alpha/PixArt-Sigma-XL-2-512-MS",
+                   "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS",
+                   "PixArt-alpha/PixArt-Sigma-XL-2-2K-MS"]
+#    custom_models_alpha = ["artificialguybr/Fascinatio-PixartAlpha1024-Finetuned"]  #   needs alpha pipeline instead
+#    custom_models_sigma = ["frutiemax/VintageKnockers-Pixart-Sigma-XL-2-512-MS",
+#                           "frutiemax/VintageKnockers-Pixart-Sigma-XL-2-1024-MS"
+#                           ]
+
+#    models_list.extend(custom_models_sigma)
+    
     from modules.ui_components import ToolButton
 
+    def getGalleryIndex (evt: gr.SelectData):
+        global galleryIndex
+        galleryIndex = evt.index
+
     def reuseLastSeed ():
-        global lastSeed
-        return lastSeed
+        global lastSeed, galleryIndex
+        return lastSeed + galleryIndex
         
     def randomSeed ():
         return -1
@@ -193,30 +230,38 @@ def on_ui_tabs():
                 prompt = gr.Textbox(label='Prompt', placeholder='Enter a prompt here...', default='')
                 negative_prompt = gr.Textbox(label='Negative Prompt', placeholder='')
                 with gr.Row():
-                    model = gr.Dropdown(["PixArt-alpha/PixArt-Sigma-XL-2-256x256",
-                                         "PixArt-alpha/PixArt-Sigma-XL-2-512-MS",
-                                         "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS",
-                                         "PixArt-alpha/PixArt-Sigma-XL-2-2K-MS"],
-                                        label='Model', value="PixArt-alpha/PixArt-Sigma-XL-2-512-MS", type='value', scale=1)
+                    model = gr.Dropdown(models_list,
+                                        label='Model', value="PixArt-alpha/PixArt-Sigma-XL-2-512-MS", type='value', scale=2)
                     sampling_seed = gr.Number(label='Seed', value=-1, precision=0, scale=1)
                     random = ToolButton(value="\U0001f3b2\ufe0f")
                     reuseSeed = ToolButton(value="\u267b\ufe0f")
                 with gr.Row():
+                    scheduler = gr.Dropdown(["default",
+                                             "DEIS",
+                                             "DPM",
+                                             "DPMsinglestep",
+                                             "Euler",
+                                             "Euler A",
+                                             "UniPC"],
+                        label='Sampler', value="default", type='value', scale=1)
                     guidance_scale = gr.Slider(label='CFG', minimum=1, maximum=8, step=0.5, value=4.0, scale=2)
                     steps = gr.Slider(label='Steps', minimum=1, maximum=60, step=1, value=20, scale=2)
-                    batch_size = gr.Slider(label='Batch Size', minimum=1, maximum=9, step=1, value=1)
+                    batch_size = gr.Number(label='Batch Size', minimum=1, maximum=9, step=1, value=1, precision=0, scale=0)
                 with gr.Row():
                     width = gr.Slider(label='Width', minimum=128, maximum=4096, step=8, value=512, elem_id="PixArtSigma_width")
                     swapper = ToolButton(value="\U000021C5")
                     height = gr.Slider(label='Height', minimum=128, maximum=4096, step=8, value=768, elem_id="PixArtSigma_height")
 
 
-                ctrls = [prompt, negative_prompt, model, width, height, guidance_scale, steps, sampling_seed, batch_size]
+                ctrls = [prompt, negative_prompt, model, width, height, guidance_scale, steps, sampling_seed, batch_size, scheduler]
 
             with gr.Column():
                 generate_button = gr.Button(value="Generate")
-                output_gallery = gr.Gallery(label='Output', height=shared.opts.gallery_height or None, show_label=False, object_fit='contain', visible=True, columns=3, preview=True)
-                
+                output_gallery = gr.Gallery(label='Output', height=shared.opts.gallery_height or None,
+                                            show_label=False, object_fit='contain', visible=True, columns=3, preview=True)
+#   gallery movement buttons don't work, others do
+#   caption not displaying linebreaks
+
                 with gr.Row():
                     buttons = parameters_copypaste.create_buttons(["img2img", "inpaint", "extras"])
 
@@ -228,6 +273,9 @@ def on_ui_tabs():
         swapper.click(fn=None, _js="function(){switchWidthHeight('PixArtSigma')}", inputs=None, outputs=None, show_progress=False)
         random.click(randomSeed, inputs=[], outputs=sampling_seed, show_progress=False)
         reuseSeed.click(reuseLastSeed, inputs=[], outputs=sampling_seed, show_progress=False)
+
+
+        output_gallery.select (fn=getGalleryIndex, inputs=[], outputs=[])
 
         generate_button.click(predict, inputs=ctrls, outputs=[output_gallery])
     return [(pixartsigma_block, "PixArtSigma", "pixart_sigma")]

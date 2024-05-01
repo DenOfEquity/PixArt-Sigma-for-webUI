@@ -25,11 +25,13 @@ I can generate using all models, though the 2K model does hit shared memory a lo
 
 ---
 ### added 01/05/2024 ###
-samplers
-captions in gallery (where linebreaks?)
-correct seeds for batches
+* samplers
+* captions in gallery (where linebreaks?)
+* correct seeds for batches
 
 ---
+prompt: portrait photograph, woman with red hair, wearing green blazer over yellow tshirt and blue trousers, on sunny beach with dark clouds on horizon
+
 ![portrait photograph, woman with red hair, wearing green blazer over yellow tshirt and blue trousers, on sunny beach with dark clouds on horizon](example.png "20 steps with 1024 model")
 
 ---

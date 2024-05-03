@@ -25,9 +25,11 @@ transformers==4.40
 These upgrades didn't break anything for me.
 
 ---
-At your own risk. This is barely tested, and even then only on my computer.
+At your own risk. This is ~~barely~~ moderately tested, ~~and even then~~ but only on my computer.
 Models will be downloaded automatically, on demand (so if you never generate with the 256 model, it'll never be downloaded). The T5 text encoder is around 18Gb and the image models are about 2.3Gb each.
-I preferentially load a fp16 version of the T5 model. Fall back is to the full model which is converted to fp16 when used. Line to save it locally (in models/diffusers) is commented out. If you'd like to do as I do, uncomment the cast line and *text_encoder.save_pretrained* line (from line 99). This significantly improves the speed of the first processing step, from ~45 seconds to ~8 seconds.
+I preferentially load a fp16 version of the T5 model. Fall back is to the full model which is converted to fp16 when used. This conversion and saving is automatic. Once done, the full size float32 models could be deleted to reclaim some space.
+
+Note that Alpha and Sigma both use the same T5 text encoder model, my caching system means it should only be downloaded once.
 
 I can generate using all models, though the 2K model does hit shared memory a lot, so is significantly slower.
 
@@ -39,12 +41,23 @@ I can generate using all models, though the 2K model does hit shared memory a lo
 
 ### added 02/05/2024 ###
 * support for PixArt-Alpha models - they use the same T5 text encoder.
-* fixed (but still commented out) saving of fp16 text encoder. Previously might not have saved in the right place.
+* fixed ~~(but still commented out)~~ saving of fp16 text encoder. Previously might not have saved in the right place.
+
+### added 03/04/2024
+* added SA-solver, DPM SDE
+* forced default sampler for LCM, DMD models
+* forced empty negative, 1 step, 1 CFG for DMD
+* cache VAE to share between models. Sharing is default behaviour for PixArt-Sigma, but the Alpha models each had their own copy. Now it'll only be downloaded the first time.
+* added LCM, DMD
+	* note: DMD doesn't install correctly - repository is missing *tokenizer* directory. Seems like the symlinks (follow the Snapshot folder) can simply be copied from another Alpha model.
+* simple optimisation: if prompts not changed, text_encoder stage is skipped
+* styles, really should be in own file for easy editing
 
 ### to do ###
-models still have duplicate VAEs, maybe neatly consolidate them too
 
-add LCM models?
+test some timestep sequences - but which samplers support custom timesteps?
+
+
 
 ---
 prompt: portrait photograph, woman with red hair, wearing green blazer over yellow tshirt and blue trousers, on sunny beach with dark clouds on horizon

@@ -4,6 +4,14 @@ I don't think there is anything Forge specific here.
 ### works for me (tm) on 8Gb VRAM, 16Gb RAM (GTX1070) ###
 
 ---
+### screenshot ###
+[source of word spam prompt](https://civitai.com/images/11438825)
+
+![](screenshot.png "20 steps with 1024 model")
+
+
+
+---
 ### downloads models on demand - minimum will be ~20Gb ###
 ### needs updated *diffusers* ###
 be sure you are updating the right one, in Forge:
@@ -69,4 +77,5 @@ prompt: portrait photograph, woman with red hair, wearing green blazer over yell
 ---
 Thanks to:
 	[frutiemax92](https://github.com/frutiemax92) for inference_pipeline.py
+
 	[benjamin-bertram](https://github.com/benjamin-bertram/sdweb-easy-stablecascade-diffusers) for ui details

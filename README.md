@@ -1,7 +1,7 @@
 ## PixArt Sigma (and Alpha) for webui ##
 ### Forge tested, probably A1111 too ###
 I don't think there is anything Forge specific here.
-### works for me (tm) on 8Gb VRAM, 16Gb RAM (GTX1070) ###
+### works for me <sup>TM</sup> on 8Gb VRAM, 16Gb RAM (GTX1070) ###
 
 ---
 ### screenshot ###
@@ -39,7 +39,7 @@ I preferentially load a fp16 version of the T5 model. Fall back is to the full m
 
 Note that Alpha and Sigma both use the same T5 text encoder model, my caching system means it should only be downloaded once.
 
-I can generate using all models, though the 2K model does hit shared memory a lot, so is significantly slower.
+I can generate using all models.
 
 ---
 ### added 01/05/2024 ###

@@ -73,9 +73,7 @@ prompt: portrait photograph, woman with red hair, wearing green blazer over yell
 ![portrait photograph, woman with red hair, wearing green blazer over yellow tshirt and blue trousers, on sunny beach with dark clouds on horizon](example.png "20 steps with 1024 model")
 
 ---
-
----
 Thanks to:
-	[frutiemax92](https://github.com/frutiemax92) for inference_pipeline.py
-
-	[benjamin-bertram](https://github.com/benjamin-bertram/sdweb-easy-stablecascade-diffusers) for ui details
+* [frutiemax92](https://github.com/frutiemax92) for inference_pipeline.py
+* [benjamin-bertram](https://github.com/benjamin-bertram/sdweb-easy-stablecascade-diffusers) for ui details
+ 

@@ -205,7 +205,7 @@ def predict(positive_prompt, negative_prompt, model, width, height, guidance_sca
             vae=vae,
             torch_dtype=torch.float16, )
 
-    pipe.enable_attention_slicing("max")
+#    pipe.enable_attention_slicing("max")
 
     if isDMD:
         negative_prompt = ""

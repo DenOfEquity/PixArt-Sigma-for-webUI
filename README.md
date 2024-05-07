@@ -7,7 +7,7 @@ I don't think there is anything Forge specific here.
 ### screenshot ###
 current UI
 
-![](screenshot.png2 "20 steps with 1024 model")
+![](screenshot2.png "20 steps with 1024 model")
 
 
 

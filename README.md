@@ -59,7 +59,7 @@ I can generate using all models.
 * added LCM, DMD
 	* note: DMD doesn't install correctly - repository is missing *tokenizer* directory. Seems like the symlinks (follow the Snapshot folder) can simply be copied from another Alpha model.
 * simple optimisation: if prompts not changed, text_encoder stage is skipped
-* styles, really should be in own file for easy editing
+* styles, ~~really should be in own file for easy editing~~
 
 ### 04/05/2024 ###
 * UI reshuffle. again

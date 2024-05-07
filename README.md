@@ -5,9 +5,9 @@ I don't think there is anything Forge specific here.
 
 ---
 ### screenshot ###
-[source of word spam prompt](https://civitai.com/images/11438825)
+current UI
 
-![](screenshot.png "20 steps with 1024 model")
+![](screenshot.png2 "20 steps with 1024 model")
 
 
 
@@ -61,10 +61,16 @@ I can generate using all models.
 * simple optimisation: if prompts not changed, text_encoder stage is skipped
 * styles, really should be in own file for easy editing
 
+### 04/05/2024 ###
+* UI reshuffle. again
+* made using OpenAI consistency decoder VAE optional (previously DMD always used it, and other Alpha models never did, Sigma models can't) - it's VRAM greedy (for me only usable on 512 models) and not always better.
+
+### 07/05/2024 ###
+* various tweaks. The K button enables karras sigmas for schedulers/samplers, which could be worth experimenting with.
+* img2img
+
+
 ### to do ###
-
-test some timestep sequences - but which samplers support custom timesteps?
-
 
 
 ---
@@ -76,4 +82,3 @@ prompt: portrait photograph, woman with red hair, wearing green blazer over yell
 Thanks to:
 * [frutiemax92](https://github.com/frutiemax92) for inference_pipeline.py
 * [benjamin-bertram](https://github.com/benjamin-bertram/sdweb-easy-stablecascade-diffusers) for ui details
- 

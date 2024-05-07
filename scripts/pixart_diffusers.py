@@ -3,7 +3,8 @@ import math
 import torch
 import gc
 import json
-
+import numpy as np
+#
 from modules import script_callbacks, images, shared
 from modules.processing import get_fixed_seed
 from modules.rng import create_generator
@@ -11,7 +12,13 @@ from modules.shared import opts
 from modules.ui_components import ResizeHandleRow
 import modules.infotext_utils as parameters_copypaste
 
-torch.backends.cuda.enable_mem_efficient_sdp(True)
+from PIL import Image
+
+torch.backends.cuda.enable_flash_sdp(True) 
+#torch.backends.cuda.enable_mem_efficient_sdp(False)     #   minimal difference
+
+
+import customStylesList as styles
 
 class PixArtStorage:
     lastSeed = -1
@@ -22,14 +29,20 @@ class PixArtStorage:
     pos_attention = None
     neg_embeds = None
     neg_attention = None
+    denoise = 0.0
+    karras = False
+
 
 from transformers import T5EncoderModel, T5Tokenizer
 from diffusers import PixArtSigmaPipeline, PixArtAlphaPipeline, Transformer2DModel
 from diffusers import AutoencoderKL
 from diffusers import ConsistencyDecoderVAE
 from diffusers import DEISMultistepScheduler, DPMSolverSinglestepScheduler, DPMSolverMultistepScheduler, DPMSolverSDEScheduler
-from diffusers import EulerAncestralDiscreteScheduler, EulerDiscreteScheduler, UniPCMultistepScheduler
+from diffusers import EulerAncestralDiscreteScheduler, EulerDiscreteScheduler, UniPCMultistepScheduler, DDPMScheduler
 from diffusers import SASolverScheduler
+#from peft import PeftModel, PeftConfig
+
+from diffusers.utils.torch_utils import randn_tensor
 
 
 import argparse
@@ -41,6 +54,7 @@ current_file_path = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(current_file_path))
 
 
+
 # modules/infotext_utils.py
 def quote(text):
     if ',' not in str(text) and '\n' not in str(text) and ':' not in str(text):
@@ -50,10 +64,11 @@ def quote(text):
 
 # modules/processing.py
 def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, steps, seed, scheduler, width, height):
+    karras = " : Karras" if PixArtStorage.karras == True else ""
     generation_params = {
         "Size": f"{width}x{height}",
         "Seed": seed,
-        "Scheduler": scheduler,
+        "Scheduler": f"{scheduler}{karras}",
         "Steps": steps,
         "CFG": guidance_scale,
         "RNG": opts.randn_source if opts.randn_source != "GPU" else None
@@ -66,37 +81,16 @@ def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, ste
 
     return f"Model: {model}\n{prompt_text}{generation_params_text}"
 
-def predict(positive_prompt, negative_prompt, model, width, height, guidance_scale, num_steps, sampling_seed, num_images, scheduler, style, *args):
-
-####    shamelessly copied from PixArt repo on Github
-    styles_list = [
-        ("", ""),
-        ("cinematic still {prompt} . emotional, harmonious, vignette, highly detailed, high budget, bokeh, cinemascope, moody, epic, gorgeous, film grain, grainy",
-         "anime, cartoon, graphic, text, painting, crayon, graphite, abstract, glitch, deformed, mutated, ugly, disfigured"),
-        ("cinematic photo {prompt} . 35mm photograph, film, bokeh, professional, 4k, highly detailed",
-         "drawing, painting, crayon, sketch, graphite, impressionist, noisy, blurry, soft, deformed, ugly"),
-        ("anime artwork {prompt} . anime style, key visual, vibrant, studio anime,  highly detailed",
-         "photo, deformed, black and white, realism, disfigured, low contrast"),
-        ("manga style {prompt} . vibrant, high-energy, detailed, iconic, Japanese comic style",
-         "ugly, deformed, noisy, blurry, low contrast, realism, photorealistic, Western comic style"),
-        ("concept art {prompt} . digital artwork, illustrative, painterly, matte painting, highly detailed",
-         "photo, photorealistic, realism, ugly"),
-        ("pixel-art {prompt} . low-res, blocky, pixel art style, 8-bit graphics",
-         "sloppy, messy, blurry, noisy, highly detailed, ultra textured, photo, realistic"),
-        ("ethereal fantasy concept art of  {prompt} . magnificent, celestial, ethereal, painterly, epic, majestic, magical, fantasy art, cover art, dreamy",
-         "photographic, realistic, realism, 35mm film, dslr, cropped, frame, text, deformed, glitch, noise, noisy, off-center, deformed, cross-eyed, closed eyes, bad anatomy, ugly, disfigured, sloppy, duplicate, mutated, black and white"),
-        ("neonpunk style {prompt} . cyberpunk, vaporwave, neon, vibes, vibrant, stunningly beautiful, crisp, detailed, sleek, ultramodern, magenta highlights, dark purple shadows, high contrast, cinematic, ultra detailed, intricate, professional",
-         "painting, drawing, illustration, glitch, deformed, mutated, cross-eyed, ugly, disfigured"),
-        ("professional 3d model {prompt} . octane render, highly detailed, volumetric, dramatic lighting",
-         "ugly, deformed, noisy, low poly, blurry, painting"), ]
-
+def predict(positive_prompt, negative_prompt, model, vae, width, height, guidance_scale, num_steps, DMDstep, sampling_seed, num_images, scheduler, i2iSource, i2iDenoise, style, *args):
 
     if style != 0:
-        p, n = styles_list[style]
-        positive_prompt = p.replace("{prompt}", positive_prompt)
-        negative_prompt = n + negative_prompt
+        positive_prompt = styles.styles_list[style][1].replace("{prompt}", positive_prompt)
+        negative_prompt = styles.styles_list[style][2] + negative_prompt
 
-
+    if i2iSource == None:
+        i2iDenoise = 1
+    if i2iDenoise < (num_steps + 1) / 1000:
+        i2iDenoise = (num_steps + 1) / 1000
 
     from diffusers.utils import logging
     logging.set_verbosity(logging.WARN)       #   download information is useful
@@ -111,6 +105,7 @@ def predict(positive_prompt, negative_prompt, model, width, height, guidance_sca
     isSigma = "PixArt-Sigma" in model
     isDMD = "PixArt-Alpha-DMD" in model
     isLCM = "PixArt-LCM" in model
+    useConsistencyVAE = (isSigma == 0) and (vae == 1)
 
 #    algorithm_type = args.algorithm
 #    beta_schedule = args.beta_schedule
@@ -156,13 +151,20 @@ def predict(positive_prompt, negative_prompt, model, width, height, guidance_sca
                 safe_serialization=True, )
             print ("Saved fp16 T5 text encoder, will use this from now on.")
 
+##        try:
+##            from optimum.bettertransformer import BetterTransformer
+##            text_encoder = BetterTransformer.transform(text_encoder)
+##        except:
+##            print ("BetterTransformer not available.")
 
-
-####    VAEs are consistent for Alpha, and for Sigma. Sigma already shared, now Alpha is too.
+####    VAEs are same for Alpha, and for Sigma. Sigma already shared, now Alpha is too.
 
 ########    DMD uses consistencyVAE
-    if isDMD:
-        vae = ConsistencyDecoderVAE.from_pretrained("openai/consistency-decoder", torch_dtype=torch.float16)
+    if useConsistencyVAE:
+        vae = ConsistencyDecoderVAE.from_pretrained(
+            "openai/consistency-decoder",
+            local_files_only=False, cache_dir=".//models//diffusers//",
+            torch_dtype=torch.float16)
     else:    
         cachedVAE = ".//models//diffusers//pixart_T5_fp16//vaeSigma" if isSigma else ".//models//diffusers//pixart_T5_fp16//vaeAlpha"
         sourceVAE = "PixArt-alpha/pixart_sigma_sdxlvae_T5_diffusers" if isSigma else model
@@ -205,14 +207,8 @@ def predict(positive_prompt, negative_prompt, model, width, height, guidance_sca
             vae=vae,
             torch_dtype=torch.float16, )
 
-#    pipe.enable_attention_slicing("max")
-
     if isDMD:
         negative_prompt = ""
-        guidance_scale = 1
-        num_steps = 1
-    if isDMD or isLCM:
-        scheduler = 'default'
 
     if useCachedEmbeds == False:
         with torch.no_grad():
@@ -234,41 +230,107 @@ def predict(positive_prompt, negative_prompt, model, width, height, guidance_sca
     torch.cuda.empty_cache()
 
 
+
+
+
+
 ####    load transformer, same for Alpha and Sigma
-    pipe.transformer = Transformer2DModel.from_pretrained(
-        model,
-        local_files_only=False, cache_dir=".//models//diffusers//",
+    transformer = Transformer2DModel.from_pretrained(
+        model,                                  # custom model here results in black image only
+#        ".//models//diffusers//PixArtCustom//fascinatioRedmond",
+        local_files_only=False, #cache_dir=".//models//diffusers//",
         subfolder='transformer',
         torch_dtype=torch.float16,
         low_cpu_mem_usage=False,
         device_map=None, )
 
+##    # LoRA model -can't find examples in necessary form
+##    loraLocation = ".//models//diffusers//PixArtLora"
+##    loraName = "Wednesday.safetensors"
+##    transformer = PeftModel.from_pretrained(
+##        transformer,
+##        loraLocation,
+##        adapter_name=loraName,
+##        config=None,
+##        local_files_only=True)
+
+
+
+    pipe.transformer = transformer
+    del transformer
+
     pipe.to('cuda')
     pipe.enable_model_cpu_offload()
 
+    with torch.no_grad():
+        #  if using resolution_binning, must use adjusted width/height here (don't overwrite values)
+        #alway generate the noise here
+        generator = [torch.Generator(device='cpu').manual_seed(fixed_seed+i) for i in range(num_images)]
+
+        if True:#use_resolution_binning:
+            from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import (
+                ASPECT_RATIO_256_BIN,
+                ASPECT_RATIO_512_BIN,
+                ASPECT_RATIO_1024_BIN,
+            )
+            from diffusers.pipelines.pixart_alpha.pipeline_pixart_sigma import (
+                ASPECT_RATIO_2048_BIN,
+            )
+
+            if pipe.transformer.config.sample_size == 256:
+                aspect_ratio_bin = ASPECT_RATIO_2048_BIN
+            elif pipe.transformer.config.sample_size == 128:
+                aspect_ratio_bin = ASPECT_RATIO_1024_BIN
+            elif pipe.transformer.config.sample_size == 64:
+                aspect_ratio_bin = ASPECT_RATIO_512_BIN
+            elif pipe.transformer.config.sample_size == 32:
+                aspect_ratio_bin = ASPECT_RATIO_256_BIN
+            else:
+                raise ValueError("Invalid sample size")
+
+            ar = float(height / width)
+            closest_ratio = min(aspect_ratio_bin.keys(), key=lambda ratio: abs(float(ratio) - ar))
+            theight = int(aspect_ratio_bin[closest_ratio][0])
+            twidth  = int(aspect_ratio_bin[closest_ratio][1])
+        else:
+            theight = height
+            twidth  = width
+
+        shape = (
+            num_images,
+            pipe.transformer.config.in_channels,
+            int(theight) // pipe.vae_scale_factor,
+            int(twidth) // pipe.vae_scale_factor,
+        )
+
+        i2i_latents = randn_tensor(shape, generator=generator, dtype=torch.float16).to('cuda').to(torch.float16)
+
+        if i2iSource != None:
+            i2iSource = i2iSource.resize((twidth, theight))
+
+            image = pipe.image_processor.preprocess(i2iSource).to('cuda').to(torch.float16)
+            image_latents = pipe.vae.encode(image).latent_dist.sample(generator) * pipe.vae.config.scaling_factor * pipe.scheduler.init_noise_sigma
+            image_latents = image_latents.repeat(num_images, 1, 1, 1)
+
+            pipe.scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
+            ts = torch.tensor([int(1000 * i2iDenoise) - 1], device='cpu')
+            ts = ts[:1].repeat(num_images)
+
+            i2i_latents = pipe.scheduler.add_noise(image_latents, i2i_latents, ts)
+
+            del image, image_latents, i2iSource
 
 
 
-##        #test, save fp16 transformer, not so important
-##        pipe.transformer.save_pretrained(
-##            save_directory=".//models//diffusers//",    #save here, default name (doesn't indicate original)
-##            variant="fp16",
-##            safe_serialization=True, )
-
-
-#   if not Windows:    
-#       pipe.transformer = torch.compile(pipe.transformer, mode="reduce-overhead", fullgraph=True)
-
-    
-    generator = [torch.Generator().manual_seed(fixed_seed+i) for i in range(num_images)]
-
-
-
-    if scheduler == 'DEIS':
+    if scheduler == 'DDPM':
+        pipe.scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
+    elif scheduler == 'DEIS':
         pipe.scheduler = DEISMultistepScheduler.from_config(pipe.scheduler.config)
-    elif scheduler == 'DPM':
+    elif scheduler == 'DPM++ 2M':
         pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
-    elif scheduler == 'DPMsinglestep':
+    elif scheduler == "DPM++ 2M SDE":
+        pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config, algorithm_type='sde-dpmsolver++')
+    elif scheduler == 'DPM':
         pipe.scheduler = DPMSolverSinglestepScheduler.from_config(pipe.scheduler.config)
     elif scheduler == 'DPM SDE':
         pipe.scheduler = DPMSolverSDEScheduler.from_config(pipe.scheduler.config)
@@ -280,36 +342,24 @@ def predict(positive_prompt, negative_prompt, model, width, height, guidance_sca
         pipe.scheduler = SASolverScheduler.from_config(pipe.scheduler.config, algorithm_type='data_prediction')
     elif scheduler == 'UniPC':
         pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
-
-
-    
 #   else uses default set by model
 
+    pipe.scheduler.config.num_train_timesteps = int(1000 * i2iDenoise)
+    pipe.scheduler.use_karras_sigmas = PixArtStorage.karras
+
+    timesteps = None
+    if isDMD:
+        guidance_scale = 1
+        num_steps = 1
+        timesteps = [DMDstep]
+    if isDMD or isLCM:
+        scheduler = 'default'
+
 ##    pipe.scheduler.beta_schedule  = beta_schedule
-##    pipe.scheduler.algorithm_type = algorithm_type
-##    pipe.scheduler.use_karras_sigmas = karras
 ##    pipe.scheduler.use_lu_lambdas = use_lu_lambdas
 
-
-####    generate some good? timesteps, this is an exponential-cosine blend, by me
-##    CEB_timesteps = []
-##    if num_steps != 1:
-##        timestep_max = 1000
-##        timestep_min = 5
-##        K = (timestep_min / timestep_max)**(1/(num_steps-1))
-##        E = timestep_max
-##
-##        for x in range(num_steps):
-##            p = x / (num_steps-1)
-##            C = timestep_min + 0.5*(timestep_max-timestep_min)*(1 - math.cos(math.pi*(1 - p**0.5)))
-##            CEB_timesteps.append(int(0.5 + C + p * (E - C)))
-##            E *= K
-##
-##        print (CEB_timesteps)
-
-
-
     output = pipe(
+        latents=i2i_latents,
         negative_prompt=None, 
         num_inference_steps=num_steps,
         height=height,
@@ -322,15 +372,19 @@ def predict(positive_prompt, negative_prompt, model, width, height, guidance_sca
         num_images_per_prompt=num_images,
         output_type="pil",
         generator=generator,
-        timesteps=[400] if isDMD else None,
+        use_resolution_binning=True,
+        timesteps=timesteps,
     ).images
 
-    del pipe.transformer, vae, generator
-    pipe.transformer = None
+#   vae uses lots of VRAM, especially with batches, maybe worth output to latent, free memory
+#   but seem to need vae loaded earlier anyway
 
+    del pipe.transformer, generator, vae
+    pipe.transformer = None
+    gc.collect()
+    torch.cuda.empty_cache()
 
     result = []
-    
     for image in output:
         info=create_infotext(
             model,
@@ -353,22 +407,16 @@ def predict(positive_prompt, negative_prompt, model, width, height, guidance_sca
         fixed_seed += 1
 
     del output, pipe
+    gc.collect()
+    torch.cuda.empty_cache()
 
     return result
 
 
 
-
-
 def on_ui_tabs():
-    styles_list = ["(None)",
-                   "Cinematic", "Photographic",
-                   "Anime", "Manga",
-                   "Digital art", "Pixel art",
-                   "Fantasy art", "Neonpunk", "3D model"
-                  ]
-   
-    models_list_alpha = ["PixArt-alpha/PixArt-XL-2-256x256",
+    models_list_alpha = [
+                         "PixArt-alpha/PixArt-XL-2-256x256",
                          "PixArt-alpha/PixArt-XL-2-512x512",
                          "PixArt-alpha/PixArt-XL-2-1024-MS",
                          "PixArt-alpha/PixArt-Alpha-DMD-XL-2-512x512"]
@@ -396,43 +444,106 @@ def on_ui_tabs():
     def randomSeed ():
         return -1
 
-    with gr.Blocks() as pixartsigma_block:
+    def i2iSetDimensions (image):
+        if image is not None:
+            return [image.size[0], image.size[1]]
+
+    def i2iresizeImage (image, width, height):
+        if image is not None:
+            resized = image.resize((width, height))
+            return resized
+
+    def i2iImageFromGallery (gallery):
+        try:
+            newImage = gallery[PixArtStorage.galleryIndex][0]['name'].split('?')
+            return newImage[0]
+        except:
+            return None
+
+##    def testVAEroundtrip (image):
+##        gc.collect()
+##        torch.cuda.empty_cache()
+##
+##        image = np.array(image).astype(np.float16) / 255.0
+##        image = image[None].transpose(0, 3, 1, 2)
+##        image = torch.from_numpy(image)
+##
+##        vae = AutoencoderKL.from_pretrained(".//models//diffusers//pixart_T5_fp16//vaeSigma", variant="fp16", torch_dtype=torch.float16).to('cuda')
+##
+##        latents = vae.encode(image.to('cuda')).latent_dist.sample() * vae.config.scaling_factor
+##
+##        image = vae.decode(latents / vae.config.scaling_factor, return_dict=False)[0]
+##
+##        image = image[0]
+##        image = np.array(image.to('cpu').detach().numpy())
+##        image = (image * 255).round().astype("uint8")
+##        image = image.transpose(1, 2, 0)
+##        pil = Image.fromarray(image)
+##
+##        return pil
+
+    def toggleKarras ():
+        if PixArtStorage.karras == False:
+            PixArtStorage.karras = True
+            return gr.Button.update(value='\U0001D40A', variant='primary')
+        else:
+            PixArtStorage.karras = False
+            return gr.Button.update(value='\U0001D542', variant='secondary')
+
+    with gr.Blocks() as pixartsigma2_block:
         with ResizeHandleRow():
             with gr.Column():
-                positive_prompt = gr.Textbox(label='Prompt', placeholder='Enter a prompt here...', default='')
-                with gr.Row():
-                    negative_prompt = gr.Textbox(label='Negative', placeholder='')
-                    style = gr.Dropdown(styles_list, label='Style', value="(None)", type='index', scale=0)
                 with gr.Row():
                     model = gr.Dropdown(models_list, label='Model', value="PixArt-alpha/PixArt-Sigma-XL-2-512-MS", type='value', scale=2)
-                    sampling_seed = gr.Number(label='Seed', value=-1, precision=0, scale=1)
-                    random = ToolButton(value="\U0001f3b2\ufe0f")
-                    reuseSeed = ToolButton(value="\u267b\ufe0f")
-                with gr.Row():
+                    vae = gr.Dropdown(["default", "consistency"], label='VAE', value="default", type='index', scale=1)
                     scheduler = gr.Dropdown(["default",
+                                             "DDPM",
                                              "DEIS",
+                                             "DPM++ 2M",
+                                             "DPM++ 2M SDE",
                                              "DPM",
                                              "DPM SDE",
-                                             "DPMsinglestep",
                                              "Euler",
                                              "Euler A",
                                              "SA-solver",
                                              "UniPC",
                                              ],
                         label='Sampler', value="UniPC", type='value', scale=1)
-                    guidance_scale = gr.Slider(label='CFG', minimum=1, maximum=8, step=0.5, value=4.0, scale=2)
-                    steps = gr.Slider(label='Steps', minimum=1, maximum=60, step=1, value=20, scale=2)
-                    batch_size = gr.Number(label='Batch Size', minimum=1, maximum=9, step=1, value=1, precision=0, scale=0)
+                    karras = ToolButton(value="\U0001D542", variant='secondary')
+
+                positive_prompt = gr.Textbox(label='Prompt', placeholder='Enter a prompt here...', default='')
+
+                with gr.Row():
+                    negative_prompt = gr.Textbox(label='Negative', placeholder='')
+                    style = gr.Dropdown([x[0] for x in styles.styles_list], label='Style', value="(None)", type='index', scale=0)
                 with gr.Row():
                     width = gr.Slider(label='Width', minimum=128, maximum=4096, step=8, value=512, elem_id="PixArtSigma_width")
                     swapper = ToolButton(value="\U000021C5")
                     height = gr.Slider(label='Height', minimum=128, maximum=4096, step=8, value=768, elem_id="PixArtSigma_height")
 
+                with gr.Row():
+                    guidance_scale = gr.Slider(label='CFG', minimum=1, maximum=8, step=0.5, value=4.0, scale=2, visible=True)
+                    steps = gr.Slider(label='Steps', minimum=1, maximum=60, step=1, value=20, scale=2, visible=True)
+                    DMDstep = gr.Slider(label='Timestep for DMD', minimum=1, maximum=999, step=1, value=400, scale=1, visible=False)
+                with gr.Row():
+                    sampling_seed = gr.Number(label='Seed', value=-1, precision=0, scale=1)
+                    random = ToolButton(value="\U0001f3b2\ufe0f")
+                    reuseSeed = ToolButton(value="\u267b\ufe0f")
+                    batch_size = gr.Number(label='Batch Size', minimum=1, maximum=9, value=1, precision=0, scale=0)
 
-                ctrls = [positive_prompt, negative_prompt, model, width, height, guidance_scale, steps, sampling_seed, batch_size, scheduler, style]
+                with gr.Accordion(label='image to image', open=False):
+                    with gr.Row():
+                        i2iSource = gr.Image(label='image to image source', sources=['upload'], type='pil', interactive=True, show_download_button=False)
+                        with gr.Column():
+                            i2iDenoise = gr.Slider(label='Denoise', minimum=0.00, maximum=1.0, step=0.01, value=0.5)
+                            i2iSetWH = gr.Button(value='Set Width / Height from image')
+                            i2iResize = gr.Button(value='Resize image to Width / Height')
+                            i2iFromGallery = gr.Button(value='Get image from gallery')
+
+                ctrls = [positive_prompt, negative_prompt, model, vae, width, height, guidance_scale, steps, DMDstep, sampling_seed, batch_size, scheduler, i2iSource, i2iDenoise, style]
 
             with gr.Column():
-                generate_button = gr.Button(value="Generate")
+                generate_button = gr.Button(value="Generate", variant='primary', visible=True, elem_id="PixArtSigma_generate")
                 output_gallery = gr.Gallery(label='Output', height=shared.opts.gallery_height or None,
                                             show_label=False, object_fit='contain', visible=True, columns=3, preview=True)
 #   gallery movement buttons don't work, others do
@@ -446,14 +557,37 @@ def on_ui_tabs():
                         paste_button=button, tabname=tabname, source_text_component=positive_prompt, source_image_component=output_gallery,
                     ))
 
+
+        def show_steps(m):
+            if "PixArt-Alpha-DMD" in m:
+                return gr.update(visible=False), gr.update(visible=False), gr.update(visible=True)
+            else:
+                return gr.update(visible=True), gr.update(visible=True), gr.update(visible=False)
+
+        model.change(
+            fn=show_steps,
+            inputs=model,
+            outputs=[guidance_scale, steps, DMDstep],
+            show_progress=False
+        )
+
+
+        karras.click(toggleKarras, inputs=[], outputs=karras)
         swapper.click(fn=None, _js="function(){switchWidthHeight('PixArtSigma')}", inputs=None, outputs=None, show_progress=False)
         random.click(randomSeed, inputs=[], outputs=sampling_seed, show_progress=False)
         reuseSeed.click(reuseLastSeed, inputs=[], outputs=sampling_seed, show_progress=False)
 
+        i2iSetWH.click (fn=i2iSetDimensions, inputs=[i2iSource], outputs=[width, height], show_progress=False)
+        i2iResize.click (fn=i2iresizeImage, inputs=[i2iSource, width, height], outputs=[i2iSource])
+        i2iFromGallery.click (fn=i2iImageFromGallery, inputs=[output_gallery], outputs=[i2iSource])
 
         output_gallery.select (fn=getGalleryIndex, inputs=[], outputs=[])
 
         generate_button.click(predict, inputs=ctrls, outputs=[output_gallery])
-    return [(pixartsigma_block, "PixArtSigma", "pixart_sigma")]
+    return [(pixartsigma2_block, "PixArtSigma", "pixart_sigma")]
 
 script_callbacks.on_ui_tabs(on_ui_tabs)
+
+
+
+

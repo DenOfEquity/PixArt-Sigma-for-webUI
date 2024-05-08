@@ -345,7 +345,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 #   else uses default set by model
 
     pipe.scheduler.config.num_train_timesteps = int(1000 * i2iDenoise)
-    pipe.scheduler.use_karras_sigmas = PixArtStorage.karras
+    pipe.scheduler.config.use_karras_sigmas = PixArtStorage.karras
 
     timesteps = None
     if isDMD:

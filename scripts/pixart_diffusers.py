@@ -1,4 +1,3 @@
-import gradio as gr
 import math
 import torch
 import gc
@@ -9,8 +8,9 @@ from modules import script_callbacks, images, shared
 from modules.processing import get_fixed_seed
 from modules.rng import create_generator
 from modules.shared import opts
-from modules.ui_components import ResizeHandleRow
+from modules.ui_components import ResizeHandleRow, ToolButton
 import modules.infotext_utils as parameters_copypaste
+import gradio as gr
 
 from PIL import Image
 
@@ -74,6 +74,7 @@ def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, ste
         "RNG": opts.randn_source if opts.randn_source != "GPU" else None
     }
 
+#add i2i marker - effectively just check PixArtStorage.denoise as if =1, no i2i effect
     prompt_text = f"Prompt: {positive_prompt}\n"
     if negative_prompt != "":
         prompt_text += (f"Negative: {negative_prompt}\n")
@@ -410,7 +411,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
     gc.collect()
     torch.cuda.empty_cache()
 
-    return result
+    return result, gr.Button.update(value='Generate', variant='primary', interactive=True)
 
 
 
@@ -433,8 +434,6 @@ def on_ui_tabs():
 
     models_list = models_list_alpha + models_list_sigma
     
-    from modules.ui_components import ToolButton
-
     def getGalleryIndex (evt: gr.SelectData):
         PixArtStorage.galleryIndex = evt.index
 
@@ -448,10 +447,7 @@ def on_ui_tabs():
         if image is not None:
             return [image.size[0], image.size[1]]
 
-    def i2iresizeImage (image, width, height):
-        if image is not None:
-            resized = image.resize((width, height))
-            return resized
+#add a blur?
 
     def i2iImageFromGallery (gallery):
         try:
@@ -490,6 +486,10 @@ def on_ui_tabs():
             PixArtStorage.karras = False
             return gr.Button.update(value='\U0001D542', variant='secondary')
 
+
+    def toggleGenerate ():
+        return gr.Button.update(value='...', variant='secondary', interactive=False)
+
     with gr.Blocks() as pixartsigma2_block:
         with ResizeHandleRow():
             with gr.Column():
@@ -509,12 +509,12 @@ def on_ui_tabs():
                                              "UniPC",
                                              ],
                         label='Sampler', value="UniPC", type='value', scale=1)
-                    karras = ToolButton(value="\U0001D542", variant='secondary')
+                    karras = ToolButton(value="\U0001D542", variant='secondary', tooltip="use Karras sigmas")
 
-                positive_prompt = gr.Textbox(label='Prompt', placeholder='Enter a prompt here...', default='')
+                positive_prompt = gr.Textbox(label='Prompt', placeholder='Enter a prompt here...', default='', lines=2)
 
                 with gr.Row():
-                    negative_prompt = gr.Textbox(label='Negative', placeholder='')
+                    negative_prompt = gr.Textbox(label='Negative', placeholder='', lines=2)
                     style = gr.Dropdown([x[0] for x in styles.styles_list], label='Style', value="(None)", type='index', scale=0)
                 with gr.Row():
                     width = gr.Slider(label='Width', minimum=128, maximum=4096, step=8, value=512, elem_id="PixArtSigma_width")
@@ -537,7 +537,6 @@ def on_ui_tabs():
                         with gr.Column():
                             i2iDenoise = gr.Slider(label='Denoise', minimum=0.00, maximum=1.0, step=0.01, value=0.5)
                             i2iSetWH = gr.Button(value='Set Width / Height from image')
-                            i2iResize = gr.Button(value='Resize image to Width / Height')
                             i2iFromGallery = gr.Button(value='Get image from gallery')
 
                 ctrls = [positive_prompt, negative_prompt, model, vae, width, height, guidance_scale, steps, DMDstep, sampling_seed, batch_size, scheduler, i2iSource, i2iDenoise, style]
@@ -554,7 +553,9 @@ def on_ui_tabs():
 
                 for tabname, button in buttons.items():
                     parameters_copypaste.register_paste_params_button(parameters_copypaste.ParamBinding(
-                        paste_button=button, tabname=tabname, source_text_component=positive_prompt, source_image_component=output_gallery,
+                        paste_button=button, tabname=tabname,
+                        source_text_component=positive_prompt,
+                        source_image_component=output_gallery,
                     ))
 
 
@@ -578,16 +579,14 @@ def on_ui_tabs():
         reuseSeed.click(reuseLastSeed, inputs=[], outputs=sampling_seed, show_progress=False)
 
         i2iSetWH.click (fn=i2iSetDimensions, inputs=[i2iSource], outputs=[width, height], show_progress=False)
-        i2iResize.click (fn=i2iresizeImage, inputs=[i2iSource, width, height], outputs=[i2iSource])
         i2iFromGallery.click (fn=i2iImageFromGallery, inputs=[output_gallery], outputs=[i2iSource])
 
         output_gallery.select (fn=getGalleryIndex, inputs=[], outputs=[])
 
-        generate_button.click(predict, inputs=ctrls, outputs=[output_gallery])
+        generate_button.click(toggleGenerate, inputs=[], outputs=[generate_button])
+        generate_button.click(predict, inputs=ctrls, outputs=[output_gallery, generate_button])
+
     return [(pixartsigma2_block, "PixArtSigma", "pixart_sigma")]
 
 script_callbacks.on_ui_tabs(on_ui_tabs)
-
-
-
 

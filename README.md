@@ -57,7 +57,7 @@ I can generate using all models.
 * forced empty negative, 1 step, 1 CFG for DMD
 * cache VAE to share between models. Sharing is default behaviour for PixArt-Sigma, but the Alpha models each had their own copy. Now it'll only be downloaded the first time.
 * added LCM, DMD
-	* note: DMD doesn't install correctly - repository is missing *tokenizer* directory. Seems like the symlinks (follow the Snapshot folder) can simply be copied from another Alpha model.
+	* ~~note: DMD doesn't install correctly - repository is missing *tokenizer* directory. Seems like the symlinks (follow the Snapshot folder) can simply be copied from another Alpha model.~~ This shouldn't be an issue anymore, as I always fetch tokenizer from the same place rather than from each model.
 * simple optimisation: if prompts not changed, text_encoder stage is skipped
 * styles, ~~really should be in own file for easy editing~~
 

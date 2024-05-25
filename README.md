@@ -7,7 +7,7 @@ I don't think there is anything Forge specific here.
 ### screenshot ###
 current UI
 
-![](screenshot2.png "20 steps with 1024 model")
+![](screenshot2.png "UI screenshot")
 
 
 
@@ -69,6 +69,8 @@ I can generate using all models.
 * various tweaks. The K button enables karras sigmas for schedulers/samplers, which could be worth experimenting with.
 * img2img
 
+#### 25/05/2024 ####
+avoid error message when Set Width/Height from Image without an image loaded
 
 ### to do ###
 

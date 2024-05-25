@@ -130,8 +130,8 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         try:
             text_encoder = T5EncoderModel.from_pretrained(
                 ".//models//diffusers//pixart_T5_fp16",
-                local_files_only=True,
                 variant="fp16",
+                local_files_only=True,
                 torch_dtype=torch.float16,
                 device_map="auto", )
         except:
@@ -160,8 +160,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 
 ####    VAEs are same for Alpha, and for Sigma. Sigma already shared, now Alpha is too.
 
-########    DMD uses consistencyVAE
-    if useConsistencyVAE:
+    if useConsistencyVAE:   #   option for Alpha models
         vae = ConsistencyDecoderVAE.from_pretrained(
             "openai/consistency-decoder",
             local_files_only=False, cache_dir=".//models//diffusers//",
@@ -235,7 +234,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 
 
 
-####    load transformer, same for Alpha and Sigma
+####    load transformer, same process for Alpha and Sigma
     transformer = Transformer2DModel.from_pretrained(
         model,                                  # custom model here results in black image only
 #        ".//models//diffusers//PixArtCustom//fascinatioRedmond",
@@ -264,8 +263,8 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
     pipe.enable_model_cpu_offload()
 
     with torch.no_grad():
-        #  if using resolution_binning, must use adjusted width/height here (don't overwrite values)
-        #alway generate the noise here
+        #   if using resolution_binning, must use adjusted width/height here (don't overwrite values)
+        #   always generate the noise here
         generator = [torch.Generator(device='cpu').manual_seed(fixed_seed+i) for i in range(num_images)]
 
         if True:#use_resolution_binning:
@@ -443,9 +442,11 @@ def on_ui_tabs():
     def randomSeed ():
         return -1
 
-    def i2iSetDimensions (image):
+    def i2iSetDimensions (image, w, h):
         if image is not None:
-            return [image.size[0], image.size[1]]
+            w = image.size[0]
+            h = image.size[1]
+        return [w, h]
 
 #add a blur?
 
@@ -455,28 +456,6 @@ def on_ui_tabs():
             return newImage[0]
         except:
             return None
-
-##    def testVAEroundtrip (image):
-##        gc.collect()
-##        torch.cuda.empty_cache()
-##
-##        image = np.array(image).astype(np.float16) / 255.0
-##        image = image[None].transpose(0, 3, 1, 2)
-##        image = torch.from_numpy(image)
-##
-##        vae = AutoencoderKL.from_pretrained(".//models//diffusers//pixart_T5_fp16//vaeSigma", variant="fp16", torch_dtype=torch.float16).to('cuda')
-##
-##        latents = vae.encode(image.to('cuda')).latent_dist.sample() * vae.config.scaling_factor
-##
-##        image = vae.decode(latents / vae.config.scaling_factor, return_dict=False)[0]
-##
-##        image = image[0]
-##        image = np.array(image.to('cpu').detach().numpy())
-##        image = (image * 255).round().astype("uint8")
-##        image = image.transpose(1, 2, 0)
-##        pil = Image.fromarray(image)
-##
-##        return pil
 
     def toggleKarras ():
         if PixArtStorage.karras == False:
@@ -542,7 +521,7 @@ def on_ui_tabs():
                 ctrls = [positive_prompt, negative_prompt, model, vae, width, height, guidance_scale, steps, DMDstep, sampling_seed, batch_size, scheduler, i2iSource, i2iDenoise, style]
 
             with gr.Column():
-                generate_button = gr.Button(value="Generate", variant='primary', visible=True, elem_id="PixArtSigma_generate")
+                generate_button = gr.Button(value="Generate", variant='primary', visible=True)
                 output_gallery = gr.Gallery(label='Output', height=shared.opts.gallery_height or None,
                                             show_label=False, object_fit='contain', visible=True, columns=3, preview=True)
 #   gallery movement buttons don't work, others do
@@ -578,7 +557,7 @@ def on_ui_tabs():
         random.click(randomSeed, inputs=[], outputs=sampling_seed, show_progress=False)
         reuseSeed.click(reuseLastSeed, inputs=[], outputs=sampling_seed, show_progress=False)
 
-        i2iSetWH.click (fn=i2iSetDimensions, inputs=[i2iSource], outputs=[width, height], show_progress=False)
+        i2iSetWH.click (fn=i2iSetDimensions, inputs=[i2iSource, width, height], outputs=[width, height], show_progress=False)
         i2iFromGallery.click (fn=i2iImageFromGallery, inputs=[output_gallery], outputs=[i2iSource])
 
         output_gallery.select (fn=getGalleryIndex, inputs=[], outputs=[])

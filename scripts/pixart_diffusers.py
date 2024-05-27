@@ -229,11 +229,6 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
     gc.collect()
     torch.cuda.empty_cache()
 
-
-
-
-
-
 ####    load transformer, same process for Alpha and Sigma
     transformer = Transformer2DModel.from_pretrained(
         model,                                  # custom model here results in black image only
@@ -320,7 +315,13 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 
             del image, image_latents, i2iSource
 
-
+    timesteps = None
+    if isDMD:
+        guidance_scale = 1
+        num_steps = 1
+        timesteps = [DMDstep]
+    if isDMD or isLCM:
+        scheduler = 'default'
 
     if scheduler == 'DDPM':
         pipe.scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
@@ -346,14 +347,6 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 
     pipe.scheduler.config.num_train_timesteps = int(1000 * i2iDenoise)
     pipe.scheduler.config.use_karras_sigmas = PixArtStorage.karras
-
-    timesteps = None
-    if isDMD:
-        guidance_scale = 1
-        num_steps = 1
-        timesteps = [DMDstep]
-    if isDMD or isLCM:
-        scheduler = 'default'
 
 ##    pipe.scheduler.beta_schedule  = beta_schedule
 ##    pipe.scheduler.use_lu_lambdas = use_lu_lambdas

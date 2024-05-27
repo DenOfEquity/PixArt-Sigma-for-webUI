@@ -63,18 +63,21 @@ def quote(text):
     return json.dumps(text, ensure_ascii=False)
 
 # modules/processing.py
-def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, steps, seed, scheduler, width, height):
+def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, steps, DMDstep, seed, scheduler, width, height):
     karras = " : Karras" if PixArtStorage.karras == True else ""
+    isDMD = "PixArt-Alpha-DMD" in model
     generation_params = {
         "Size": f"{width}x{height}",
         "Seed": seed,
         "Scheduler": f"{scheduler}{karras}",
-        "Steps": steps,
-        "CFG": guidance_scale,
+        "Steps": steps if not isDMD else None,
+        "CFG": guidance_scale if not isDMD else None,
+        "DMDstep": DMDstep if isDMD else None,
         "RNG": opts.randn_source if opts.randn_source != "GPU" else None
     }
 
 #add i2i marker - effectively just check PixArtStorage.denoise as if =1, no i2i effect
+
     prompt_text = f"Prompt: {positive_prompt}\n"
     if negative_prompt != "":
         prompt_text += (f"Negative: {negative_prompt}\n")
@@ -229,15 +232,16 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
     gc.collect()
     torch.cuda.empty_cache()
 
+
 ####    load transformer, same process for Alpha and Sigma
     transformer = Transformer2DModel.from_pretrained(
         model,                                  # custom model here results in black image only
-#        ".//models//diffusers//PixArtCustom//fascinatioRedmond",
         local_files_only=False, #cache_dir=".//models//diffusers//",
         subfolder='transformer',
         torch_dtype=torch.float16,
         low_cpu_mem_usage=False,
         device_map=None, )
+
 
 ##    # LoRA model -can't find examples in necessary form
 ##    loraLocation = ".//models//diffusers//PixArtLora"
@@ -316,6 +320,11 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
             del image, image_latents, i2iSource
 
     timesteps = None
+
+#    if useCustomTimeSteps:
+#    timesteps = [999, 845, 730, 587, 443, 310, 193, 116, 53, 13]    #   AYS sdXL
+    #loglin interpolate to number of steps
+    
     if isDMD:
         guidance_scale = 1
         num_steps = 1
@@ -347,6 +356,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 
     pipe.scheduler.config.num_train_timesteps = int(1000 * i2iDenoise)
     pipe.scheduler.config.use_karras_sigmas = PixArtStorage.karras
+
 
 ##    pipe.scheduler.beta_schedule  = beta_schedule
 ##    pipe.scheduler.use_lu_lambdas = use_lu_lambdas
@@ -382,7 +392,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         info=create_infotext(
             model,
             positive_prompt, negative_prompt,
-            guidance_scale, num_steps,
+            guidance_scale, num_steps, DMDstep,
             fixed_seed, scheduler,
             width, height, )
 

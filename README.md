@@ -65,6 +65,10 @@ I can generate using all models.
 #### 25/05/2024 ####
 avoid error message when Set Width/Height from Image without an image loaded
 
+#### 27/05/2024 ####
+* override sampler for LCM and DMD in right place, a bit earlier than before
+* added saving of DMD step in infotext when using DMD model; also don't save CFG and step count for DMD (would be redundant)
+
 ### to do ###
 
 

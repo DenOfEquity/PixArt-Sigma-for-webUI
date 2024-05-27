@@ -14,26 +14,19 @@ current UI
 ---
 ### downloads models on demand - minimum will be ~20Gb ###
 ### needs updated *diffusers* ###
-be sure you are updating the right one, in Forge:
-```
-*forge directory*\system\python\Lib\site-packages
-```
-```
-pip install --upgrade -t .\ git+https://github.com/huggingface/diffusers
-```
-You should end up with v0.28.0 (as of 30/04/2024).
-There is code for earlier versions of diffusers, but it didn't work with the 2K model and needed updating for 256 and 1024 (at least for me).
-
 ### Alpha needs updated *transformers* and *tokenizers* ###
-Easiest way to achieve this is to edit **requirements.text** and **requirements_versions.txt** in the webUI folder. Otherwise starting the webUI will undo the tokenizers upgrade.
+As of 27/05/2024, diffusers is offically up to version 0.28.0, so installing a beta is no longer necessary.
+
+Easiest way to ensure necessary versions are installed is to edit **requirements.text** and **requirements_versions.txt** in the webUI folder. Otherwise starting the webUI will undo the tokenizers upgrade.
 ```
+diffusers>=0.28.0
 tokenizers>=0.19
 transformers==4.40
 ```
 These upgrades didn't break anything for me.
 
 ---
-At your own risk. This is ~~barely~~ moderately tested, ~~and even then~~ but only on my computer.
+At your own risk. This is ~~barely~~ ~~moderately~~ somewhat tested, ~~and even then~~ but only on my computer.
 Models will be downloaded automatically, on demand (so if you never generate with the 256 model, it'll never be downloaded). The T5 text encoder is around 18Gb and the image models are about 2.3Gb each.
 I preferentially load a fp16 version of the T5 model. Fall back is to the full model which is converted to fp16 when used. This conversion and saving is automatic. Once done, the full size float32 models could be deleted to reclaim some space.
 

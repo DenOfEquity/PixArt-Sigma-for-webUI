@@ -4,6 +4,10 @@ I don't think there is anything Forge specific here.
 ### works for me <sup>TM</sup> on 8Gb VRAM, 16Gb RAM (GTX1070) ###
 
 ---
+## Install ##
+Go to the **Extensions** tab, then **Install from URL**, use the URL for this repository.
+
+---
 ### screenshot ###
 current UI
 

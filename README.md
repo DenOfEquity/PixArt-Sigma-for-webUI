@@ -19,7 +19,7 @@ As of 27/05/2024, diffusers is offically up to version 0.28.0, so installing a b
 
 Easiest way to ensure necessary versions are installed is to edit **requirements.text** and **requirements_versions.txt** in the webUI folder. Otherwise starting the webUI will undo the tokenizers upgrade.
 ```
-diffusers>=0.28.0
+diffusers>=0.28.1
 tokenizers>=0.19
 transformers==4.40
 ```
@@ -35,16 +35,26 @@ Note that Alpha and Sigma both use the same T5 text encoder model, my caching sy
 I can generate using all models.
 
 ---
-### added 01/05/2024 ###
-* samplers
-* captions in gallery (where linebreaks?)
-* correct seeds for batches
 
-### added 02/05/2024 ###
-* support for PixArt-Alpha models - they use the same T5 text encoder.
-* fixed ~~(but still commented out)~~ saving of fp16 text encoder. Previously might not have saved in the right place.
+#### 05/06/2024 ####
+* small update to work with diffusers >= 0.28.1 : Transformer2DModel is now PixArtTransformer2DModel
 
-### added 03/04/2024
+#### 27/05/2024 ####
+* override sampler for LCM and DMD in right place, a bit earlier than before
+* added saving of DMD step in infotext when using DMD model; also don't save CFG and step count for DMD (would be redundant)
+
+#### 25/05/2024 ####
+avoid error message when Set Width/Height from Image without an image loaded
+
+### 07/05/2024 ###
+* various tweaks. The K button enables karras sigmas for schedulers/samplers, which could be worth experimenting with.
+* img2img
+
+### 04/05/2024 ###
+* UI reshuffle. again
+* made using OpenAI consistency decoder VAE optional (previously DMD always used it, and other Alpha models never did, Sigma models can't) - it's VRAM greedy (for me only usable on 512 models) and not always better.
+
+### 03/04/2024
 * added SA-solver, DPM SDE
 * forced default sampler for LCM, DMD models
 * forced empty negative, 1 step, 1 CFG for DMD
@@ -54,23 +64,14 @@ I can generate using all models.
 * simple optimisation: if prompts not changed, text_encoder stage is skipped
 * styles, ~~really should be in own file for easy editing~~
 
-### 04/05/2024 ###
-* UI reshuffle. again
-* made using OpenAI consistency decoder VAE optional (previously DMD always used it, and other Alpha models never did, Sigma models can't) - it's VRAM greedy (for me only usable on 512 models) and not always better.
+### 02/05/2024 ###
+* support for PixArt-Alpha models - they use the same T5 text encoder.
+* fixed ~~(but still commented out)~~ saving of fp16 text encoder. Previously might not have saved in the right place.
 
-### 07/05/2024 ###
-* various tweaks. The K button enables karras sigmas for schedulers/samplers, which could be worth experimenting with.
-* img2img
-
-#### 25/05/2024 ####
-avoid error message when Set Width/Height from Image without an image loaded
-
-#### 27/05/2024 ####
-* override sampler for LCM and DMD in right place, a bit earlier than before
-* added saving of DMD step in infotext when using DMD model; also don't save CFG and step count for DMD (would be redundant)
-
-#### 05/06/2024 ####
-* small update to work with diffusers >= 0.28.1 : Transformer2DModel is now PixArtTransformer2DModel
+### 01/05/2024 ###
+* samplers
+* captions in gallery (where linebreaks?)
+* correct seeds for batches
 
 
 ### to do ###

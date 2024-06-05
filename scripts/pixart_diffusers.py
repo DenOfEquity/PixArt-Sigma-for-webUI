@@ -34,7 +34,7 @@ class PixArtStorage:
 
 
 from transformers import T5EncoderModel, T5Tokenizer
-from diffusers import PixArtSigmaPipeline, PixArtAlphaPipeline, Transformer2DModel
+from diffusers import PixArtSigmaPipeline, PixArtAlphaPipeline, PixArtTransformer2DModel
 from diffusers import AutoencoderKL
 from diffusers import ConsistencyDecoderVAE
 from diffusers import DEISMultistepScheduler, DPMSolverSinglestepScheduler, DPMSolverMultistepScheduler, DPMSolverSDEScheduler
@@ -234,7 +234,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 
 
 ####    load transformer, same process for Alpha and Sigma
-    transformer = Transformer2DModel.from_pretrained(
+    transformer = PixArtTransformer2DModel.from_pretrained(
         model,                                  # custom model here results in black image only
         local_files_only=False, #cache_dir=".//models//diffusers//",
         subfolder='transformer',

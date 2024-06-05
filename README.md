@@ -69,6 +69,10 @@ avoid error message when Set Width/Height from Image without an image loaded
 * override sampler for LCM and DMD in right place, a bit earlier than before
 * added saving of DMD step in infotext when using DMD model; also don't save CFG and step count for DMD (would be redundant)
 
+#### 05/06/2024 ####
+* small update to work with diffusers >= 0.28.1 : Transformer2DModel is now PixArtTransformer2DModel
+
+
 ### to do ###
 
 

@@ -14,7 +14,7 @@ import gradio as gr
 
 from PIL import Image
 
-torch.backends.cuda.enable_flash_sdp(True) 
+#torch.backends.cuda.enable_flash_sdp(True)
 #torch.backends.cuda.enable_mem_efficient_sdp(False)     #   minimal difference
 
 
@@ -39,8 +39,8 @@ from diffusers import AutoencoderKL
 from diffusers import ConsistencyDecoderVAE
 from diffusers import DEISMultistepScheduler, DPMSolverSinglestepScheduler, DPMSolverMultistepScheduler, DPMSolverSDEScheduler
 from diffusers import EulerAncestralDiscreteScheduler, EulerDiscreteScheduler, UniPCMultistepScheduler, DDPMScheduler
-from diffusers import SASolverScheduler
-#from peft import PeftModel, PeftConfig
+from diffusers import SASolverScheduler, LCMScheduler
+from peft import PeftModel
 
 from diffusers.utils.torch_utils import randn_tensor
 
@@ -106,10 +106,12 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
     PixArtStorage.lastSeed = fixed_seed
 
     ####    identify model type basde on name
+    isFlash = "flash-pixart" in model
     isSigma = "PixArt-Sigma" in model
     isDMD = "PixArt-Alpha-DMD" in model
     isLCM = "PixArt-LCM" in model
     useConsistencyVAE = (isSigma == 0) and (vae == 1)
+    
 
 #    algorithm_type = args.algorithm
 #    beta_schedule = args.beta_schedule
@@ -190,9 +192,20 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
                 variant="fp16", )
             print ("Saved fp16 " + "Sigma" if isSigma else "Alpha" + " VAE, will use this from now on.")
 
+    vae.enable_tiling(True) #make optional/based on dimensions
+
     logging.set_verbosity(logging.ERROR)       #   avoid some console spam from Alpha models missing keys
 
-    if isSigma:
+
+    if isFlash:
+        pipe = PixArtAlphaPipeline.from_pretrained(
+            "PixArt-alpha/PixArt-XL-2-1024-MS",
+            tokenizer=tokenizer,
+            text_encoder=text_encoder,
+            transformer=None,
+            vae=vae,
+            torch_dtype=torch.float16, )        
+    elif isSigma:
         pipe = PixArtSigmaPipeline.from_pretrained(
             "PixArt-alpha/pixart_sigma_sdxlvae_T5_diffusers",
             local_files_only=False, cache_dir=".//models//diffusers//",
@@ -209,6 +222,8 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
             transformer=None,
             vae=vae,
             torch_dtype=torch.float16, )
+
+    del vae
 
     if isDMD:
         negative_prompt = ""
@@ -234,13 +249,27 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 
 
 ####    load transformer, same process for Alpha and Sigma
-    transformer = PixArtTransformer2DModel.from_pretrained(
-        model,                                  # custom model here results in black image only
-        local_files_only=False, #cache_dir=".//models//diffusers//",
-        subfolder='transformer',
-        torch_dtype=torch.float16,
-        low_cpu_mem_usage=False,
-        device_map=None, )
+    if isFlash: #   base is an attempt at future proofing - base pipeline is currently always Alpha
+        base = "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS" if isSigma else "PixArt-alpha/PixArt-XL-2-1024-MS"
+        # Load LoRA
+        transformer = PixArtTransformer2DModel.from_pretrained(
+            base,
+            subfolder="transformer",
+            torch_dtype=torch.float16
+        )
+        transformer = PeftModel.from_pretrained(
+            transformer,
+            "jasperai/flash-pixart"
+        )
+
+    else:
+        transformer = PixArtTransformer2DModel.from_pretrained(
+            model,         # custom model here results in black image only
+            local_files_only=False, cache_dir=".//models//diffusers//",
+            subfolder='transformer',
+            torch_dtype=torch.float16,
+            low_cpu_mem_usage=False,
+            device_map=None, )
 
 
 ##    # LoRA model -can't find examples in necessary form
@@ -259,7 +288,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
     del transformer
 
     pipe.to('cuda')
-    pipe.enable_model_cpu_offload()
+#    pipe.enable_model_cpu_offload()
 
     with torch.no_grad():
         #   if using resolution_binning, must use adjusted width/height here (don't overwrite values)
@@ -329,10 +358,18 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         guidance_scale = 1
         num_steps = 1
         timesteps = [DMDstep]
+
     if isDMD or isLCM:
         scheduler = 'default'
-
-    if scheduler == 'DDPM':
+    elif isFlash:
+        # Scheduler
+        pipe.scheduler = LCMScheduler.from_pretrained(
+            "PixArt-alpha/PixArt-XL-2-1024-MS",
+            subfolder="scheduler",
+            timestep_spacing="trailing",
+        )
+        scheduler = 'LCM'
+    elif scheduler == 'DDPM':
         pipe.scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
     elif scheduler == 'DEIS':
         pipe.scheduler = DEISMultistepScheduler.from_config(pipe.scheduler.config)
@@ -382,7 +419,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 #   vae uses lots of VRAM, especially with batches, maybe worth output to latent, free memory
 #   but seem to need vae loaded earlier anyway
 
-    del pipe.transformer, generator, vae
+    del pipe.transformer, generator, i2i_latents
     pipe.transformer = None
     gc.collect()
     torch.cuda.empty_cache()
@@ -422,6 +459,7 @@ def on_ui_tabs():
                          "PixArt-alpha/PixArt-XL-2-256x256",
                          "PixArt-alpha/PixArt-XL-2-512x512",
                          "PixArt-alpha/PixArt-XL-2-1024-MS",
+                         "jasperai/flash-pixart",
                          "PixArt-alpha/PixArt-Alpha-DMD-XL-2-512x512"]
 
     models_list_sigma = ["PixArt-alpha/PixArt-Sigma-XL-2-256x256",

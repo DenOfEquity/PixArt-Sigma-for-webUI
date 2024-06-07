@@ -7,6 +7,7 @@ I don't think there is anything Forge specific here.
 ## Install ##
 Go to the **Extensions** tab, then **Install from URL**, use the URL for this repository.
 
+
 ---
 ### screenshot ###
 current UI
@@ -39,6 +40,8 @@ Note that Alpha and Sigma both use the same T5 text encoder model, my caching sy
 I can generate using all models.
 
 ---
+#### 07/06/2024 ####
+* added [flash diffusion](https://huggingface.co/jasperai/flash-pixart). This is a distilled Lora (211MB) on top of Alpha1024: 4 steps, low CFG (1-2), seems much better than LCM. Forced LCM scheduler.
 
 #### 05/06/2024 ####
 * small update to work with diffusers >= 0.28.1 : Transformer2DModel is now PixArtTransformer2DModel
@@ -76,7 +79,6 @@ avoid error message when Set Width/Height from Image without an image loaded
 * samplers
 * captions in gallery (where linebreaks?)
 * correct seeds for batches
-
 
 ### to do ###
 

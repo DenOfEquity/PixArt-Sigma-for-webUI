@@ -17,8 +17,8 @@ from PIL import Image
 #torch.backends.cuda.enable_flash_sdp(True)
 #torch.backends.cuda.enable_mem_efficient_sdp(False)     #   minimal difference
 
-
-import customStylesList as styles
+import customStylesListPA as styles
+import modelsListPA as models
 
 class PixArtStorage:
     lastSeed = -1
@@ -31,6 +31,8 @@ class PixArtStorage:
     neg_attention = None
     denoise = 0.0
     karras = False
+    resolutionBin = True
+    noiseRGBA = [0.0, 0.0, 0.0, 0.0]
 
 
 from transformers import T5EncoderModel, T5Tokenizer
@@ -86,6 +88,8 @@ def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, ste
     return f"Model: {model}\n{prompt_text}{generation_params_text}"
 
 def predict(positive_prompt, negative_prompt, model, vae, width, height, guidance_scale, num_steps, DMDstep, sampling_seed, num_images, scheduler, i2iSource, i2iDenoise, style, *args):
+
+    torch.set_grad_enabled(False)
 
     if style != 0:
         positive_prompt = styles.styles_list[style][1].replace("{prompt}", positive_prompt)
@@ -229,8 +233,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         negative_prompt = ""
 
     if useCachedEmbeds == False:
-        with torch.no_grad():
-            pos_embeds, pos_attention, neg_embeds, neg_attention = pipe.encode_prompt(positive_prompt, negative_prompt=negative_prompt)
+        pos_embeds, pos_attention, neg_embeds, neg_attention = pipe.encode_prompt(positive_prompt, negative_prompt=negative_prompt)
 
         pipe.tokenizer = None
         pipe.text_encoder = None
@@ -261,21 +264,22 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
             transformer,
             "jasperai/flash-pixart"
         )
-
     else:
         transformer = PixArtTransformer2DModel.from_pretrained(
-            model,         # custom model here results in black image only
+            model,
             local_files_only=False, cache_dir=".//models//diffusers//",
             subfolder='transformer',
             torch_dtype=torch.float16,
             low_cpu_mem_usage=False,
             device_map=None, )
 
+    pipe.transformer = transformer
+    del transformer
 
 ##    # LoRA model -can't find examples in necessary form
 ##    loraLocation = ".//models//diffusers//PixArtLora"
 ##    loraName = "Wednesday.safetensors"
-##    transformer = PeftModel.from_pretrained(
+##    transformer = PeftModel.from_single_file(
 ##        transformer,
 ##        loraLocation,
 ##        adapter_name=loraName,
@@ -283,70 +287,85 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 ##        local_files_only=True)
 
 
-
-    pipe.transformer = transformer
-    del transformer
-
     pipe.to('cuda')
 #    pipe.enable_model_cpu_offload()
 
-    with torch.no_grad():
-        #   if using resolution_binning, must use adjusted width/height here (don't overwrite values)
-        #   always generate the noise here
-        generator = [torch.Generator(device='cpu').manual_seed(fixed_seed+i) for i in range(num_images)]
+    #   if using resolution_binning, must use adjusted width/height here (don't overwrite values)
+    #   always generate the noise here
+    generator = [torch.Generator(device='cpu').manual_seed(fixed_seed+i) for i in range(num_images)]
 
-        if True:#use_resolution_binning:
-            from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import (
-                ASPECT_RATIO_256_BIN,
-                ASPECT_RATIO_512_BIN,
-                ASPECT_RATIO_1024_BIN,
-            )
-            from diffusers.pipelines.pixart_alpha.pipeline_pixart_sigma import (
-                ASPECT_RATIO_2048_BIN,
-            )
-
-            if pipe.transformer.config.sample_size == 256:
-                aspect_ratio_bin = ASPECT_RATIO_2048_BIN
-            elif pipe.transformer.config.sample_size == 128:
-                aspect_ratio_bin = ASPECT_RATIO_1024_BIN
-            elif pipe.transformer.config.sample_size == 64:
-                aspect_ratio_bin = ASPECT_RATIO_512_BIN
-            elif pipe.transformer.config.sample_size == 32:
-                aspect_ratio_bin = ASPECT_RATIO_256_BIN
-            else:
-                raise ValueError("Invalid sample size")
-
-            ar = float(height / width)
-            closest_ratio = min(aspect_ratio_bin.keys(), key=lambda ratio: abs(float(ratio) - ar))
-            theight = int(aspect_ratio_bin[closest_ratio][0])
-            twidth  = int(aspect_ratio_bin[closest_ratio][1])
-        else:
-            theight = height
-            twidth  = width
-
-        shape = (
-            num_images,
-            pipe.transformer.config.in_channels,
-            int(theight) // pipe.vae_scale_factor,
-            int(twidth) // pipe.vae_scale_factor,
+    if PixArtStorage.resolutionBin:
+        from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import (
+            ASPECT_RATIO_256_BIN,
+            ASPECT_RATIO_512_BIN,
+            ASPECT_RATIO_1024_BIN,
+        )
+        from diffusers.pipelines.pixart_alpha.pipeline_pixart_sigma import (
+            ASPECT_RATIO_2048_BIN,
         )
 
-        i2i_latents = randn_tensor(shape, generator=generator, dtype=torch.float16).to('cuda').to(torch.float16)
+        if pipe.transformer.config.sample_size == 256:
+            aspect_ratio_bin = ASPECT_RATIO_2048_BIN
+        elif pipe.transformer.config.sample_size == 128:
+            aspect_ratio_bin = ASPECT_RATIO_1024_BIN
+        elif pipe.transformer.config.sample_size == 64:
+            aspect_ratio_bin = ASPECT_RATIO_512_BIN
+        elif pipe.transformer.config.sample_size == 32:
+            aspect_ratio_bin = ASPECT_RATIO_256_BIN
+        else:
+            raise ValueError("Invalid sample size")
 
-        if i2iSource != None:
-            i2iSource = i2iSource.resize((twidth, theight))
+        ar = float(height / width)
+        closest_ratio = min(aspect_ratio_bin.keys(), key=lambda ratio: abs(float(ratio) - ar))
+        theight = int(aspect_ratio_bin[closest_ratio][0])
+        twidth  = int(aspect_ratio_bin[closest_ratio][1])
+    else:
+        theight = height
+        twidth  = width
 
-            image = pipe.image_processor.preprocess(i2iSource).to('cuda').to(torch.float16)
-            image_latents = pipe.vae.encode(image).latent_dist.sample(generator) * pipe.vae.config.scaling_factor * pipe.scheduler.init_noise_sigma
-            image_latents = image_latents.repeat(num_images, 1, 1, 1)
+    shape = (
+        num_images,
+        pipe.transformer.config.in_channels,
+        int(theight) // pipe.vae_scale_factor,
+        int(twidth) // pipe.vae_scale_factor,
+    )
 
-            pipe.scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
-            ts = torch.tensor([int(1000 * i2iDenoise) - 1], device='cpu')
-            ts = ts[:1].repeat(num_images)
+    i2i_latents = randn_tensor(shape, generator=generator, dtype=torch.float16).to('cuda').to(torch.float16)
 
-            i2i_latents = pipe.scheduler.add_noise(image_latents, i2i_latents, ts)
+    #   colour the initial noise
+    if PixArtStorage.noiseRGBA[3] != 0.0:
+        nr = PixArtStorage.noiseRGBA[0] ** 0.5
+        ng = PixArtStorage.noiseRGBA[1] ** 0.5
+        nb = PixArtStorage.noiseRGBA[2] ** 0.5
 
-            del image, image_latents, i2iSource
+        imageR = torch.tensor(np.full((8,8), (nr), dtype=np.float32))
+        imageG = torch.tensor(np.full((8,8), (ng), dtype=np.float32))
+        imageB = torch.tensor(np.full((8,8), (nb), dtype=np.float32))
+        image = torch.stack((imageR, imageG, imageB), dim=0).unsqueeze(0)
+
+        image = pipe.image_processor.preprocess(image).to('cuda').to(torch.float16)
+        image_latents = pipe.vae.encode(image).latent_dist.sample(generator) * pipe.vae.config.scaling_factor * pipe.scheduler.init_noise_sigma
+        image_latents = image_latents.repeat(num_images, 1, 1, 1)
+
+        torch.lerp (i2i_latents, image_latents, PixArtStorage.noiseRGBA[3], out=i2i_latents)
+        del imageR, imageG, imageB, image, image_latents
+    #   end: colour the initial noise
+
+
+    if i2iSource != None:
+        i2iSource = i2iSource.resize((twidth, theight))
+
+        image = pipe.image_processor.preprocess(i2iSource).to('cuda').to(torch.float16)
+        image_latents = pipe.vae.encode(image).latent_dist.sample(generator) * pipe.vae.config.scaling_factor * pipe.scheduler.init_noise_sigma
+        image_latents = image_latents.repeat(num_images, 1, 1, 1)
+
+        pipe.scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
+        ts = torch.tensor([int(1000 * i2iDenoise) - 1], device='cpu')
+        ts = ts[:1].repeat(num_images)
+
+        i2i_latents = pipe.scheduler.add_noise(image_latents, i2i_latents, ts)
+
+        del image, image_latents, i2iSource
 
     timesteps = None
 
@@ -398,23 +417,24 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 ##    pipe.scheduler.beta_schedule  = beta_schedule
 ##    pipe.scheduler.use_lu_lambdas = use_lu_lambdas
 
-    output = pipe(
-        latents=i2i_latents,
-        negative_prompt=None, 
-        num_inference_steps=num_steps,
-        height=height,
-        width=width,
-        guidance_scale=guidance_scale,
-        prompt_embeds=PixArtStorage.pos_embeds,
-        negative_prompt_embeds=PixArtStorage.neg_embeds,
-        prompt_attention_mask=PixArtStorage.pos_attention,
-        negative_prompt_attention_mask=PixArtStorage.neg_attention,
-        num_images_per_prompt=num_images,
-        output_type="pil",
-        generator=generator,
-        use_resolution_binning=True,
-        timesteps=timesteps,
-    ).images
+    with torch.inference_mode():
+        output = pipe(
+            latents=i2i_latents,
+            negative_prompt=None, 
+            num_inference_steps=num_steps,
+            height=height,
+            width=width,
+            guidance_scale=guidance_scale,
+            prompt_embeds=PixArtStorage.pos_embeds,
+            negative_prompt_embeds=PixArtStorage.neg_embeds,
+            prompt_attention_mask=PixArtStorage.pos_attention,
+            negative_prompt_attention_mask=PixArtStorage.neg_attention,
+            num_images_per_prompt=num_images,
+            output_type="pil",
+            generator=generator,
+            use_resolution_binning=PixArtStorage.resolutionBin,
+            timesteps=timesteps,
+        ).images
 
 #   vae uses lots of VRAM, especially with batches, maybe worth output to latent, free memory
 #   but seem to need vae loaded earlier anyway
@@ -450,29 +470,16 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
     gc.collect()
     torch.cuda.empty_cache()
 
-    return result, gr.Button.update(value='Generate', variant='primary', interactive=True)
+    return gr.Button.update(value='Generate', variant='primary', interactive=True), result
 
 
 
 def on_ui_tabs():
-    models_list_alpha = [
-                         "PixArt-alpha/PixArt-XL-2-256x256",
-                         "PixArt-alpha/PixArt-XL-2-512x512",
-                         "PixArt-alpha/PixArt-XL-2-1024-MS",
-                         "jasperai/flash-pixart",
-                         "PixArt-alpha/PixArt-Alpha-DMD-XL-2-512x512"]
 
-    models_list_sigma = ["PixArt-alpha/PixArt-Sigma-XL-2-256x256",
-                         "PixArt-alpha/PixArt-Sigma-XL-2-512-MS",
-                         "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS",
-                         "PixArt-alpha/PixArt-Sigma-XL-2-2K-MS",
-                         "PixArt-alpha/PixArt-LCM-XL-2-1024-MS"]
-#    custom_models_alpha = ["artificialguybr/Fascinatio-PixartAlpha1024-Finetuned"]
-#    custom_models_sigma = ["frutiemax/VintageKnockers-Pixart-Sigma-XL-2-512-MS",
-#                           "frutiemax/VintageKnockers-Pixart-Sigma-XL-2-1024-MS"
-#                           ]
-
-    models_list = models_list_alpha + models_list_sigma
+    models_list = models.models_list_alpha + models.models_list_sigma
+    defaultModel = models.defaultModel
+    defaultWidth = models.defaultWidth
+    defaultHeight = models.defaultHeight
     
     def getGalleryIndex (evt: gr.SelectData):
         PixArtStorage.galleryIndex = evt.index
@@ -506,15 +513,23 @@ def on_ui_tabs():
             PixArtStorage.karras = False
             return gr.Button.update(value='\U0001D542', variant='secondary')
 
+    def toggleResBin ():
+        if PixArtStorage.resolutionBin == False:
+            PixArtStorage.resolutionBin = True
+            return gr.Button.update(value='\U0001D401', variant='primary')
+        else:
+            PixArtStorage.resolutionBin = False
+            return gr.Button.update(value='\U0001D539', variant='secondary')
 
-    def toggleGenerate ():
+    def toggleGenerate (R, G, B, A):
+        PixArtStorage.noiseRGBA = [R, G, B, A]
         return gr.Button.update(value='...', variant='secondary', interactive=False)
 
     with gr.Blocks() as pixartsigma2_block:
         with ResizeHandleRow():
             with gr.Column():
                 with gr.Row():
-                    model = gr.Dropdown(models_list, label='Model', value="PixArt-alpha/PixArt-Sigma-XL-2-512-MS", type='value', scale=2)
+                    model = gr.Dropdown(models_list, label='Model', value=defaultModel, type='value', scale=2)
                     vae = gr.Dropdown(["default", "consistency"], label='VAE', value="default", type='index', scale=1)
                     scheduler = gr.Dropdown(["default",
                                              "DDPM",
@@ -537,9 +552,10 @@ def on_ui_tabs():
                     negative_prompt = gr.Textbox(label='Negative', placeholder='', lines=2)
                     style = gr.Dropdown([x[0] for x in styles.styles_list], label='Style', value="(None)", type='index', scale=0)
                 with gr.Row():
-                    width = gr.Slider(label='Width', minimum=128, maximum=4096, step=8, value=512, elem_id="PixArtSigma_width")
+                    width = gr.Slider(label='Width', minimum=128, maximum=4096, step=8, value=defaultWidth, elem_id="PixArtSigma_width")
                     swapper = ToolButton(value="\U000021C5")
-                    height = gr.Slider(label='Height', minimum=128, maximum=4096, step=8, value=768, elem_id="PixArtSigma_height")
+                    height = gr.Slider(label='Height', minimum=128, maximum=4096, step=8, value=defaultHeight, elem_id="PixArtSigma_height")
+                    resBin = ToolButton(value="\U0001D401", variant='primary', tooltip="use resolution binning")
 
                 with gr.Row():
                     guidance_scale = gr.Slider(label='CFG', minimum=1, maximum=8, step=0.5, value=4.0, scale=2, visible=True)
@@ -550,6 +566,13 @@ def on_ui_tabs():
                     random = ToolButton(value="\U0001f3b2\ufe0f")
                     reuseSeed = ToolButton(value="\u267b\ufe0f")
                     batch_size = gr.Number(label='Batch Size', minimum=1, maximum=9, value=1, precision=0, scale=0)
+
+                with gr.Accordion(label='the colour of noise', open=False):
+                    with gr.Row():
+                        initialNoiseR = gr.Slider(minimum=0, maximum=1.0, value=0.0, step=0.01,  label='red')
+                        initialNoiseG = gr.Slider(minimum=0, maximum=1.0, value=0.0, step=0.01,  label='green')
+                        initialNoiseB = gr.Slider(minimum=0, maximum=1.0, value=0.0, step=0.01,  label='blue')
+                        initialNoiseA = gr.Slider(minimum=0, maximum=0.1, value=0.0, step=0.001, label='strength')
 
                 with gr.Accordion(label='image to image', open=False):
                     with gr.Row():
@@ -594,6 +617,7 @@ def on_ui_tabs():
 
 
         karras.click(toggleKarras, inputs=[], outputs=karras)
+        resBin.click(toggleResBin, inputs=[], outputs=resBin)
         swapper.click(fn=None, _js="function(){switchWidthHeight('PixArtSigma')}", inputs=None, outputs=None, show_progress=False)
         random.click(randomSeed, inputs=[], outputs=sampling_seed, show_progress=False)
         reuseSeed.click(reuseLastSeed, inputs=[], outputs=sampling_seed, show_progress=False)
@@ -603,8 +627,8 @@ def on_ui_tabs():
 
         output_gallery.select (fn=getGalleryIndex, inputs=[], outputs=[])
 
-        generate_button.click(toggleGenerate, inputs=[], outputs=[generate_button])
-        generate_button.click(predict, inputs=ctrls, outputs=[output_gallery, generate_button])
+        generate_button.click(toggleGenerate, inputs=[initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA], outputs=[generate_button])
+        generate_button.click(predict, inputs=ctrls, outputs=[generate_button, output_gallery])
 
     return [(pixartsigma2_block, "PixArtSigma", "pixart_sigma")]
 

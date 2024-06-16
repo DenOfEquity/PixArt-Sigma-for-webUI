@@ -33,13 +33,20 @@ These upgrades didn't break anything for me.
 ---
 At your own risk. This is ~~barely~~ ~~moderately~~ somewhat tested, ~~and even then~~ but only on my computer.
 Models will be downloaded automatically, on demand (so if you never generate with the 256 model, it'll never be downloaded). The T5 text encoder is around 18Gb and the image models are about 2.3Gb each.
-I preferentially load a fp16 version of the T5 model. Fall back is to the full model which is converted to fp16 when used. This conversion and saving is automatic. Once done, the full size float32 models could be deleted to reclaim some space.
+The models include the float32 T5 model, which I convert to fp16 on first use and save the result for all future runs. This conversion and saving is automatic. Once done, the full size float32 model could be deleted to reclaim some space.
 
-Note that Alpha and Sigma both use the same T5 text encoder model, my caching system means it should only be downloaded once.
+Note that Alpha and Sigma both use the same T5 text encoder, my caching system means it should only be downloaded once regardless for how many models are used.
 
-I can generate using all models.
+I can generate using all models, though the 2K Sigma model is very slow on my limited hardware. It's undertrained anyway, at present.
 
 ---
+#### 16/06/2024 ####
+* settings to colourize the initial noise. This is essentially free extra control. Leave strength at 0.0 to bypass it.
+
+#### 09/06/2024 ####
+* added modelsList.py in extension directory - edit in any text editor to hide models you don't care about or add new models (must be huggingface diffusers style checkpoints)
+* added button to toggle resolution binning, enabled by default and generally best left enabled IMO. I was testing disabling it for potential hires fix type uses, with some limited success around x1.5 upscale. x2 was messy. Maybe repeated smaller upscales could work, but probably better to send to img2img and use an sdXL checkpoint to upscale.
+
 #### 07/06/2024 ####
 * added [flash diffusion](https://huggingface.co/jasperai/flash-pixart). This is a distilled Lora (211MB) on top of Alpha1024: 4 steps, low CFG (1-2), seems much better than LCM. Forced LCM scheduler.
 

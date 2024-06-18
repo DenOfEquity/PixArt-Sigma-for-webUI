@@ -40,11 +40,14 @@ Note that Alpha and Sigma both use the same T5 text encoder, my caching system m
 I can generate using all models, though the 2K Sigma model is very slow on my limited hardware. It's undertrained anyway, at present.
 
 ---
+#### 17/06/2024 ####
+* tweaked logic for model identification. Added new finetune, seems likely to continue to be updated, *ptx0/pixart-sigma* to models list. [Info](https://huggingface.co/ptx0/pixart-sigma)
+
 #### 16/06/2024 ####
-* settings to colourize the initial noise. This is essentially free extra control. Leave strength at 0.0 to bypass it.
+* settings to colourize the initial noise. This is essentially free extra control. Leave strength at 0.0 to bypass it. Doesn't seem as effective with PixArt as with other models, but still something to experiment with.
 
 #### 09/06/2024 ####
-* added modelsList.py in extension directory - edit in any text editor to hide models you don't care about or add new models (must be huggingface diffusers style checkpoints)
+* added **modelsListPA.py** in extension directory - edit in any text editor to hide models you don't care about or add new models (must be huggingface diffusers style checkpoints)
 * added button to toggle resolution binning, enabled by default and generally best left enabled IMO. I was testing disabling it for potential hires fix type uses, with some limited success around x1.5 upscale. x2 was messy. Maybe repeated smaller upscales could work, but probably better to send to img2img and use an sdXL checkpoint to upscale.
 
 #### 07/06/2024 ####

@@ -84,8 +84,9 @@ def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, ste
     if negative_prompt != "":
         prompt_text += (f"Negative: {negative_prompt}\n")
     generation_params_text = ", ".join([k if k == v else f'{k}: {quote(v)}' for k, v in generation_params.items() if v is not None])
+    noise_text = f"\nInitial noise: {PixArtStorage.noiseRGBA}" if PixArtStorage.noiseRGBA[3] != 0.0 else ""
 
-    return f"Model: {model}\n{prompt_text}{generation_params_text}"
+    return f"Model: {model}\n{prompt_text}{generation_params_text}{noise_text}"
 
 def predict(positive_prompt, negative_prompt, model, vae, width, height, guidance_scale, num_steps, DMDstep, sampling_seed, num_images, scheduler, i2iSource, i2iDenoise, style, *args):
 
@@ -111,11 +112,18 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 
     ####    identify model type basde on name
     isFlash = "flash-pixart" in model
-    isSigma = "PixArt-Sigma" in model
+    isSigma = ("PixArt-Sigma" in model) or ("pixart-sigma" in model)
     isDMD = "PixArt-Alpha-DMD" in model
     isLCM = "PixArt-LCM" in model
+
+    if model in models.models_list_alpha:
+        isSigma = False
+    if model in models.models_list_sigma:
+        isSigma = True
+
+    print (isSigma)
+
     useConsistencyVAE = (isSigma == 0) and (vae == 1)
-    
 
 #    algorithm_type = args.algorithm
 #    beta_schedule = args.beta_schedule
@@ -252,7 +260,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 
 
 ####    load transformer, same process for Alpha and Sigma
-    if isFlash: #   base is an attempt at future proofing - base pipeline is currently always Alpha
+    if isFlash: #   base is an attempt at future proofing - base flash pipeline is currently always Alpha
         base = "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS" if isSigma else "PixArt-alpha/PixArt-XL-2-1024-MS"
         # Load LoRA
         transformer = PixArtTransformer2DModel.from_pretrained(
@@ -330,7 +338,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         int(twidth) // pipe.vae_scale_factor,
     )
 
-    i2i_latents = randn_tensor(shape, generator=generator, dtype=torch.float16).to('cuda').to(torch.float16)
+    latents = randn_tensor(shape, generator=generator, dtype=torch.float16).to('cuda').to(torch.float16)
 
     #   colour the initial noise
     if PixArtStorage.noiseRGBA[3] != 0.0:
@@ -345,9 +353,20 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 
         image = pipe.image_processor.preprocess(image).to('cuda').to(torch.float16)
         image_latents = pipe.vae.encode(image).latent_dist.sample(generator) * pipe.vae.config.scaling_factor * pipe.scheduler.init_noise_sigma
-        image_latents = image_latents.repeat(num_images, 1, 1, 1)
+        image_latents = image_latents.repeat(num_images, 1, latents.size(2), latents.size(3))
 
-        torch.lerp (i2i_latents, image_latents, PixArtStorage.noiseRGBA[3], out=i2i_latents)
+        for b in range(len(latents)):
+            for c in range(4):
+                latents[b][c] -= latents[b][c].mean()
+
+#        latents += image_latents * PixArtStorage.noiseRGBA[3]
+#        torch.lerp (latents, image_latents, PixArtStorage.noiseRGBA[3], out=latents)
+        pipe.scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
+        ts = torch.tensor([int(1000 * (1.0-PixArtStorage.noiseRGBA[3])) - 1], device='cpu')
+        ts = ts[:1].repeat(num_images)
+
+        latents = pipe.scheduler.add_noise(image_latents, latents, ts)
+
         del imageR, imageG, imageB, image, image_latents
     #   end: colour the initial noise
 
@@ -363,7 +382,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         ts = torch.tensor([int(1000 * i2iDenoise) - 1], device='cpu')
         ts = ts[:1].repeat(num_images)
 
-        i2i_latents = pipe.scheduler.add_noise(image_latents, i2i_latents, ts)
+        latents = pipe.scheduler.add_noise(image_latents, latents, ts)
 
         del image, image_latents, i2iSource
 
@@ -419,7 +438,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 
     with torch.inference_mode():
         output = pipe(
-            latents=i2i_latents,
+            latents=latents,
             negative_prompt=None, 
             num_inference_steps=num_steps,
             height=height,
@@ -439,7 +458,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 #   vae uses lots of VRAM, especially with batches, maybe worth output to latent, free memory
 #   but seem to need vae loaded earlier anyway
 
-    del pipe.transformer, generator, i2i_latents
+    del pipe.transformer, generator, latents
     pipe.transformer = None
     gc.collect()
     torch.cuda.empty_cache()
@@ -572,7 +591,7 @@ def on_ui_tabs():
                         initialNoiseR = gr.Slider(minimum=0, maximum=1.0, value=0.0, step=0.01,  label='red')
                         initialNoiseG = gr.Slider(minimum=0, maximum=1.0, value=0.0, step=0.01,  label='green')
                         initialNoiseB = gr.Slider(minimum=0, maximum=1.0, value=0.0, step=0.01,  label='blue')
-                        initialNoiseA = gr.Slider(minimum=0, maximum=0.1, value=0.0, step=0.001, label='strength')
+                        initialNoiseA = gr.Slider(minimum=0, maximum=0.3, value=0.0, step=0.005, label='strength')
 
                 with gr.Accordion(label='image to image', open=False):
                     with gr.Row():

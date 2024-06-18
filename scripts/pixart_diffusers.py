@@ -430,7 +430,8 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 #   else uses default set by model
 
     pipe.scheduler.config.num_train_timesteps = int(1000 * i2iDenoise)
-    pipe.scheduler.config.use_karras_sigmas = PixArtStorage.karras
+    if hasattr(pipe.scheduler.config, 'use_karras_sigmas'):
+        pipe.scheduler.config.use_karras_sigmas = PixArtStorage.karras
 
 
 ##    pipe.scheduler.beta_schedule  = beta_schedule

@@ -38,6 +38,7 @@ class PixArtStorage:
     karras = False
     resolutionBin = True
     noiseRGBA = [0.0, 0.0, 0.0, 0.0]
+    captionToPrompt = False
 
 
 from transformers import T5EncoderModel, T5Tokenizer

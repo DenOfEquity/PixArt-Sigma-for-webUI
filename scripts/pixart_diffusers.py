@@ -3,7 +3,8 @@ import torch
 import gc
 import json
 import numpy as np
-#
+import os
+
 from modules import script_callbacks, images, shared
 from modules.processing import get_fixed_seed
 from modules.rng import create_generator
@@ -112,7 +113,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 
     ####    identify model type basde on name
     isFlash = "flash-pixart" in model
-    isSigma = ("PixArt-Sigma" in model) or ("pixart-sigma" in model)
+    isSigma = "PixArt-Sigma" in model
     isDMD = "PixArt-Alpha-DMD" in model
     isLCM = "PixArt-LCM" in model
 
@@ -120,8 +121,6 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         isSigma = False
     if model in models.models_list_sigma:
         isSigma = True
-
-    print (isSigma)
 
     useConsistencyVAE = (isSigma == 0) and (vae == 1)
 
@@ -430,12 +429,15 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 #   else uses default set by model
 
     pipe.scheduler.config.num_train_timesteps = int(1000 * i2iDenoise)
+
     if hasattr(pipe.scheduler.config, 'use_karras_sigmas'):
         pipe.scheduler.config.use_karras_sigmas = PixArtStorage.karras
 
 
 ##    pipe.scheduler.beta_schedule  = beta_schedule
 ##    pipe.scheduler.use_lu_lambdas = use_lu_lambdas
+    pipe.transformer.to(memory_format=torch.channels_last)
+    pipe.vae.to(memory_format=torch.channels_last)
 
     with torch.inference_mode():
         output = pipe(
@@ -518,28 +520,78 @@ def on_ui_tabs():
 
 #add a blur?
 
+
+    def fixed_get_imports(filename: str | os.PathLike) -> list[str]:
+        if not str(filename).endswith("modeling_florence2.py"):
+            return get_imports(filename)
+        imports = get_imports(filename)
+        imports.remove("flash_attn")
+        return imports
+    def i2iMakeCaptions (image, originalPrompt):
+        if image == None:
+            return originalPrompt
+
+        with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports): #workaround for unnecessary flash_attn requirement
+            model = AutoModelForCausalLM.from_pretrained('microsoft/Florence-2-base', 
+                                                         attn_implementation="sdpa", 
+                                                         torch_dtype=torch.float32, 
+                                                         cache_dir=".//models//diffusers//", 
+                                                         trust_remote_code=True)
+        processor = AutoProcessor.from_pretrained('microsoft/Florence-2-base', #-large
+                                                  torch_dtype=torch.float32, 
+                                                  cache_dir=".//models//diffusers//", 
+                                                  trust_remote_code=True)
+
+        result = ''
+        prompts = ['<MORE_DETAILED_CAPTION>']
+
+        for p in prompts:
+            inputs = processor(text=p, images=image, return_tensors="pt")
+            generated_ids = model.generate(
+                input_ids=inputs["input_ids"],
+                pixel_values=inputs["pixel_values"],
+                max_new_tokens=1024,
+                num_beams=3,
+                do_sample=False
+            )
+            del inputs
+            generated_text = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
+            del generated_ids
+            parsed_answer = processor.post_process_generation(generated_text, task=p, image_size=(image.width, image.height))
+            del generated_text
+            print (parsed_answer)
+            result += parsed_answer[p]
+            if p != prompts[-1]:
+                result += ' | \n'
+            del parsed_answer
+
+        del model, processor
+
+        if PixArtStorage.captionToPrompt:
+            return result
+        else:
+            return originalPrompt
+
+
+
     def i2iImageFromGallery (gallery):
         try:
             newImage = gallery[PixArtStorage.galleryIndex][0]['name'].split('?')
             return newImage[0]
         except:
             return None
+    def toggleC2P ():
+        PixArtStorage.captionToPrompt ^= True
+        return gr.Button.update(variant=['secondary', 'primary'][PixArtStorage.captionToPrompt])
 
     def toggleKarras ():
-        if PixArtStorage.karras == False:
-            PixArtStorage.karras = True
-            return gr.Button.update(value='\U0001D40A', variant='primary')
-        else:
-            PixArtStorage.karras = False
-            return gr.Button.update(value='\U0001D542', variant='secondary')
-
+        PixArtStorage.karras ^= True
+        return gr.Button.update(variant='primary' if PixArtStorage.karras == True else 'secondary',
+                                value='\U0001D40A' if PixArtStorage.karras == True else '\U0001D542')
     def toggleResBin ():
-        if PixArtStorage.resolutionBin == False:
-            PixArtStorage.resolutionBin = True
-            return gr.Button.update(value='\U0001D401', variant='primary')
-        else:
-            PixArtStorage.resolutionBin = False
-            return gr.Button.update(value='\U0001D539', variant='secondary')
+        PixArtStorage.resolutionBin ^= True
+        return gr.Button.update(variant='primary' if PixArtStorage.resolutionBin == True else 'secondary',
+                                value='\U0001D401' if PixArtStorage.resolutionBin == True else '\U0001D539')
 
     def toggleGenerate (R, G, B, A):
         PixArtStorage.noiseRGBA = [R, G, B, A]
@@ -573,7 +625,7 @@ def on_ui_tabs():
                     style = gr.Dropdown([x[0] for x in styles.styles_list], label='Style', value="(None)", type='index', scale=0)
                 with gr.Row():
                     width = gr.Slider(label='Width', minimum=128, maximum=4096, step=8, value=defaultWidth, elem_id="PixArtSigma_width")
-                    swapper = ToolButton(value="\U000021C5")
+                    swapper = ToolButton(value="\U000021C4")
                     height = gr.Slider(label='Height', minimum=128, maximum=4096, step=8, value=defaultHeight, elem_id="PixArtSigma_height")
                     resBin = ToolButton(value="\U0001D401", variant='primary', tooltip="use resolution binning")
 
@@ -601,6 +653,9 @@ def on_ui_tabs():
                             i2iDenoise = gr.Slider(label='Denoise', minimum=0.00, maximum=1.0, step=0.01, value=0.5)
                             i2iSetWH = gr.Button(value='Set Width / Height from image')
                             i2iFromGallery = gr.Button(value='Get image from gallery')
+                            with gr.Row():
+                                i2iCaption = gr.Button(value='Caption this image (Florence-2)', scale=9)
+                                toPrompt = ToolButton(value='P', variant='secondary')
 
                 ctrls = [positive_prompt, negative_prompt, model, vae, width, height, guidance_scale, steps, DMDstep, sampling_seed, batch_size, scheduler, i2iSource, i2iDenoise, style]
 
@@ -644,6 +699,8 @@ def on_ui_tabs():
 
         i2iSetWH.click (fn=i2iSetDimensions, inputs=[i2iSource, width, height], outputs=[width, height], show_progress=False)
         i2iFromGallery.click (fn=i2iImageFromGallery, inputs=[output_gallery], outputs=[i2iSource])
+        i2iCaption.click (fn=i2iMakeCaptions, inputs=[i2iSource, positive_prompt], outputs=[positive_prompt])#outputs=[positive_prompt]
+        toPrompt.click(toggleC2P, inputs=[], outputs=[toPrompt])
 
         output_gallery.select (fn=getGalleryIndex, inputs=[], outputs=[])
 

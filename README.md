@@ -40,6 +40,10 @@ Note that Alpha and Sigma both use the same T5 text encoder, my caching system m
 I can generate using all models, though the 2K Sigma model is very slow on my limited hardware. It's undertrained anyway, at present.
 
 ---
+#### 25/06/2024 ####
+* added option to caption using Florence-2, in image to image section. 'P' button toggles overwriting prompt, results always written to console.
+* minor code improvements
+
 #### 17/06/2024 ####
 * tweaked logic for model identification. Added new finetune, seems likely to continue to be updated, *ptx0/pixart-sigma* to models list. [Info](https://huggingface.co/ptx0/pixart-sigma)
 

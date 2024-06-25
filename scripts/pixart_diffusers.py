@@ -14,6 +14,10 @@ import modules.infotext_utils as parameters_copypaste
 import gradio as gr
 
 from PIL import Image
+#workaround for unnecessary flash_attn requirement for Florence-2
+from unittest.mock import patch
+from transformers.dynamic_module_utils import get_imports
+from transformers import AutoProcessor, AutoModelForCausalLM 
 
 #torch.backends.cuda.enable_flash_sdp(True)
 #torch.backends.cuda.enable_mem_efficient_sdp(False)     #   minimal difference

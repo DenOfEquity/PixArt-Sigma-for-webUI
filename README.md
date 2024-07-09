@@ -18,11 +18,9 @@ current UI
 
 ---
 ### downloads models on demand - minimum will be ~20Gb ###
-### needs updated *diffusers* ###
-### Alpha needs updated *transformers* and *tokenizers* ###
-As of 27/05/2024, diffusers is offically up to version 0.28.0, so installing a beta is no longer necessary.
+### needs updated *diffusers*, *transformers*, and *tokenizers* ###
 
-Easiest way to ensure necessary versions are installed is to edit **requirements.text** and **requirements_versions.txt** in the webUI folder. Otherwise starting the webUI will undo the tokenizers upgrade.
+Easiest way to ensure necessary versions are installed is to edit **requirements_versions.txt** in the webUI folder.
 ```
 diffusers>=0.28.1
 tokenizers>=0.19
@@ -40,12 +38,23 @@ Note that Alpha and Sigma both use the same T5 text encoder, my caching system m
 I can generate using all models, though the 2K Sigma model is very slow on my limited hardware. It's undertrained anyway, at present.
 
 ---
+#### 09/07/2024 ####
+* some code cleanups
+* added prompt parsing to automatically fill in details like seed, steps, etc.
+
+#### 03/07/2024 ####
+* tweaked Florence-2: model now runs on GPU so is faster.
+
+#### 30/06/2024 ####
+* added huggingface emoji button to toggle sending of huggingface access token. Some repos may be gated, requiring acceptance of terms before use and an access token. Downloading/updating these models is not possible without these steps, but already downloaded models will continue to work ~~(current example: ptx0/pixart-900m-1024-ft)~~. The official models are not gated.
+	* Sign up / log in, go to your profile, create an access token. Copy it. Make a textfile called ```huggingface_access_token.txt``` in the main webui folder, i.e. ```{forge install directory}\webui```, and paste the token in there. (same instructions as for SD3, only needs done once).
+
 #### 25/06/2024 ####
 * added option to caption using Florence-2, in image to image section. 'P' button toggles overwriting prompt, results always written to console.
 * minor code improvements
 
 #### 17/06/2024 ####
-* tweaked logic for model identification. Added new finetune, seems likely to continue to be updated, *ptx0/pixart-sigma* to models list. [Info](https://huggingface.co/ptx0/pixart-sigma)
+* tweaked logic for model identification. Added new finetune, seems likely to continue to be updated, *ptx0/pixart-900m-1024-ft* to models list. [Info](https://huggingface.co/ptx0/pixart-900m-1024-ft)
 
 #### 16/06/2024 ####
 * settings to colourize the initial noise. This is essentially free extra control. Leave strength at 0.0 to bypass it. Doesn't seem as effective with PixArt as with other models, but still something to experiment with.

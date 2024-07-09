@@ -7,7 +7,6 @@ import os
 
 from modules import script_callbacks, images, shared
 from modules.processing import get_fixed_seed
-from modules.rng import create_generator
 from modules.shared import opts
 from modules.ui_components import ResizeHandleRow, ToolButton
 import modules.infotext_utils as parameters_copypaste
@@ -18,9 +17,6 @@ from PIL import Image
 from unittest.mock import patch
 from transformers.dynamic_module_utils import get_imports
 from transformers import AutoProcessor, AutoModelForCausalLM 
-
-#torch.backends.cuda.enable_flash_sdp(True)
-#torch.backends.cuda.enable_mem_efficient_sdp(False)     #   minimal difference
 
 import customStylesListPA as styles
 import modelsListPA as models
@@ -35,10 +31,13 @@ class PixArtStorage:
     neg_embeds = None
     neg_attention = None
     denoise = 0.0
-    karras = False
-    resolutionBin = True
     noiseRGBA = [0.0, 0.0, 0.0, 0.0]
     captionToPrompt = False
+    sendAccessToken = False
+    locked = False     #   for preventing changes to the following volatile state while generating
+    karras = False
+    vpred = False
+    resolutionBin = True
 
 
 from transformers import T5EncoderModel, T5Tokenizer
@@ -52,17 +51,6 @@ from peft import PeftModel
 
 from diffusers.utils.torch_utils import randn_tensor
 
-
-import argparse
-import pathlib
-from pathlib import Path
-import sys
-
-current_file_path = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(current_file_path))
-
-
-
 # modules/infotext_utils.py
 def quote(text):
     if ',' not in str(text) and '\n' not in str(text) and ':' not in str(text):
@@ -73,11 +61,12 @@ def quote(text):
 # modules/processing.py
 def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, steps, DMDstep, seed, scheduler, width, height):
     karras = " : Karras" if PixArtStorage.karras == True else ""
+    vpred = " : V-Prediction" if PixArtStorage.vpred == True else ""
     isDMD = "PixArt-Alpha-DMD" in model
     generation_params = {
         "Size": f"{width}x{height}",
         "Seed": seed,
-        "Scheduler": f"{scheduler}{karras}",
+        "Scheduler": f"{scheduler}{karras}{vpred}",
         "Steps": steps if not isDMD else None,
         "CFG": guidance_scale if not isDMD else None,
         "DMDstep": DMDstep if isDMD else None,
@@ -95,6 +84,14 @@ def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, ste
     return f"Model: {model}\n{prompt_text}{generation_params_text}{noise_text}"
 
 def predict(positive_prompt, negative_prompt, model, vae, width, height, guidance_scale, num_steps, DMDstep, sampling_seed, num_images, scheduler, i2iSource, i2iDenoise, style, *args):
+    
+    access_token = 0
+    if PixArtStorage.sendAccessToken == True:
+        try:
+            with open('huggingface_access_token.txt', 'r') as file:
+                access_token = file.read().strip()
+        except:
+            print ("PixArt: couldn't load 'huggingface_access_token.txt' from the webui directory. Will not be able to download/update gated models. Local cache will work.")
 
     torch.set_grad_enabled(False)
 
@@ -256,37 +253,44 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         PixArtStorage.pos_attention = pos_attention.to('cuda').to(torch.float16)
         PixArtStorage.neg_attention = neg_attention.to('cuda').to(torch.float16)
 
+        del pos_embeds, neg_embeds, pos_attention, neg_attention
+
         PixArtStorage.lastPrompt = positive_prompt
         PixArtStorage.lastNegative = negative_prompt
 
     gc.collect()
     torch.cuda.empty_cache()
 
-
+    pipe.to('cuda')
 ####    load transformer, same process for Alpha and Sigma
+    base = "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS" if isSigma else "PixArt-alpha/PixArt-XL-2-1024-MS"
     if isFlash: #   base is an attempt at future proofing - base flash pipeline is currently always Alpha
-        base = "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS" if isSigma else "PixArt-alpha/PixArt-XL-2-1024-MS"
         # Load LoRA
-        transformer = PixArtTransformer2DModel.from_pretrained(
+        pipe.transformer = PixArtTransformer2DModel.from_pretrained(
             base,
             subfolder="transformer",
             torch_dtype=torch.float16
         )
-        transformer = PeftModel.from_pretrained(
-            transformer,
+        pipe.transformer = PeftModel.from_pretrained(
+            pipe.transformer,
             "jasperai/flash-pixart"
         )
     else:
-        transformer = PixArtTransformer2DModel.from_pretrained(
-            model,
-            local_files_only=False, cache_dir=".//models//diffusers//",
-            subfolder='transformer',
-            torch_dtype=torch.float16,
-            low_cpu_mem_usage=False,
-            device_map=None, )
-
-    pipe.transformer = transformer
-    del transformer
+        try:
+            pipe.transformer = PixArtTransformer2DModel.from_pretrained(
+                model,
+                local_files_only=False, cache_dir=".//models//diffusers//",
+                subfolder='transformer',
+                torch_dtype=torch.float16,
+#                low_cpu_mem_usage=False,
+#                device_map=None, 
+                token=access_token,
+                )
+#            config=base)
+        except:
+            print ("PixArt: failed to load transformer. Repository may be gated and require a huggingface access token. See 'README.md'.")
+            PixArtStorage.locked = False
+            return gr.Button.update(value='Generate', variant='primary', interactive=True), None
 
 ##    # LoRA model -can't find examples in necessary form
 ##    loraLocation = ".//models//diffusers//PixArtLora"
@@ -298,9 +302,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 ##        config=None,
 ##        local_files_only=True)
 
-
-    pipe.to('cuda')
-#    pipe.enable_model_cpu_offload()
+    pipe.enable_model_cpu_offload()
 
     #   if using resolution_binning, must use adjusted width/height here (don't overwrite values)
     #   always generate the noise here
@@ -342,7 +344,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         int(twidth) // pipe.vae_scale_factor,
     )
 
-    latents = randn_tensor(shape, generator=generator, dtype=torch.float16).to('cuda').to(torch.float16)
+    latents = randn_tensor(shape, generator=generator).to('cuda').to(torch.float16)
 
     #   colour the initial noise
     if PixArtStorage.noiseRGBA[3] != 0.0:
@@ -373,7 +375,6 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 
         del imageR, imageG, imageB, image, image_latents
     #   end: colour the initial noise
-
 
     if i2iSource != None:
         i2iSource = i2iSource.resize((twidth, theight))
@@ -427,6 +428,8 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config)
     elif scheduler == 'Euler A':
         pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
+    elif scheduler == 'LCM':
+        pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
     elif scheduler == "SA-solver":
         pipe.scheduler = SASolverScheduler.from_config(pipe.scheduler.config, algorithm_type='data_prediction')
     elif scheduler == 'UniPC':
@@ -437,30 +440,30 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 
     if hasattr(pipe.scheduler.config, 'use_karras_sigmas'):
         pipe.scheduler.config.use_karras_sigmas = PixArtStorage.karras
+        
+    if PixArtStorage.vpred == True:
+        pipe.scheduler.config.prediction_type = 'v_prediction'
 
-
-##    pipe.scheduler.beta_schedule  = beta_schedule
-##    pipe.scheduler.use_lu_lambdas = use_lu_lambdas
     pipe.transformer.to(memory_format=torch.channels_last)
     pipe.vae.to(memory_format=torch.channels_last)
 
     with torch.inference_mode():
         output = pipe(
-            latents=latents,
-            negative_prompt=None, 
-            num_inference_steps=num_steps,
-            height=height,
-            width=width,
-            guidance_scale=guidance_scale,
-            prompt_embeds=PixArtStorage.pos_embeds,
-            negative_prompt_embeds=PixArtStorage.neg_embeds,
-            prompt_attention_mask=PixArtStorage.pos_attention,
-            negative_prompt_attention_mask=PixArtStorage.neg_attention,
-            num_images_per_prompt=num_images,
-            output_type="pil",
-            generator=generator,
-            use_resolution_binning=PixArtStorage.resolutionBin,
-            timesteps=timesteps,
+            negative_prompt                 = None,                             #   necessary
+            generator                       = generator,
+            latents                         = latents,
+            num_inference_steps             = num_steps,
+            num_images_per_prompt           = num_images,
+            height                          = height,
+            width                           = width,
+            guidance_scale                  = guidance_scale,
+            prompt_embeds                   = PixArtStorage.pos_embeds,
+            negative_prompt_embeds          = PixArtStorage.neg_embeds,
+            prompt_attention_mask           = PixArtStorage.pos_attention,
+            negative_prompt_attention_mask  = PixArtStorage.neg_attention,
+            use_resolution_binning          = PixArtStorage.resolutionBin,
+            timesteps                       = timesteps,
+            output_type                     = "pil",
         ).images
 
 #   vae uses lots of VRAM, especially with batches, maybe worth output to latent, free memory
@@ -478,7 +481,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
             positive_prompt, negative_prompt,
             guidance_scale, num_steps, DMDstep,
             fixed_seed, scheduler,
-            width, height, )
+            width, height)
 
         result.append((image, info))
         
@@ -497,12 +500,11 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
     gc.collect()
     torch.cuda.empty_cache()
 
+    PixArtStorage.locked = False
     return gr.Button.update(value='Generate', variant='primary', interactive=True), result
 
 
-
 def on_ui_tabs():
-
     models_list = models.models_list_alpha + models.models_list_sigma
     defaultModel = models.defaultModel
     defaultWidth = models.defaultWidth
@@ -523,9 +525,6 @@ def on_ui_tabs():
             h = image.size[1]
         return [w, h]
 
-#add a blur?
-
-
     def fixed_get_imports(filename: str | os.PathLike) -> list[str]:
         if not str(filename).endswith("modeling_florence2.py"):
             return get_imports(filename)
@@ -539,9 +538,9 @@ def on_ui_tabs():
         with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports): #workaround for unnecessary flash_attn requirement
             model = AutoModelForCausalLM.from_pretrained('microsoft/Florence-2-base', 
                                                          attn_implementation="sdpa", 
-                                                         torch_dtype=torch.float32, 
+                                                         torch_dtype=torch.float16, 
                                                          cache_dir=".//models//diffusers//", 
-                                                         trust_remote_code=True)
+                                                         trust_remote_code=True).to('cuda')
         processor = AutoProcessor.from_pretrained('microsoft/Florence-2-base', #-large
                                                   torch_dtype=torch.float32, 
                                                   cache_dir=".//models//diffusers//", 
@@ -552,6 +551,7 @@ def on_ui_tabs():
 
         for p in prompts:
             inputs = processor(text=p, images=image, return_tensors="pt")
+            inputs.to('cuda').to(torch.float16)
             generated_ids = model.generate(
                 input_ids=inputs["input_ids"],
                 pixel_values=inputs["pixel_values"],
@@ -566,9 +566,9 @@ def on_ui_tabs():
             del generated_text
             print (parsed_answer)
             result += parsed_answer[p]
+            del parsed_answer
             if p != prompts[-1]:
                 result += ' | \n'
-            del parsed_answer
 
         del model, processor
 
@@ -576,8 +576,6 @@ def on_ui_tabs():
             return result
         else:
             return originalPrompt
-
-
 
     def i2iImageFromGallery (gallery):
         try:
@@ -588,42 +586,100 @@ def on_ui_tabs():
     def toggleC2P ():
         PixArtStorage.captionToPrompt ^= True
         return gr.Button.update(variant=['secondary', 'primary'][PixArtStorage.captionToPrompt])
+    def toggleAccess ():
+        PixArtStorage.sendAccessToken ^= True
+        return gr.Button.update(variant=['secondary', 'primary'][PixArtStorage.sendAccessToken])
 
+    #   these are volatile state, should not be changed during generation
     def toggleKarras ():
-        PixArtStorage.karras ^= True
+        if not PixArtStorage.locked:
+            PixArtStorage.karras ^= True
         return gr.Button.update(variant='primary' if PixArtStorage.karras == True else 'secondary',
                                 value='\U0001D40A' if PixArtStorage.karras == True else '\U0001D542')
     def toggleResBin ():
-        PixArtStorage.resolutionBin ^= True
+        if not PixArtStorage.locked:
+            PixArtStorage.resolutionBin ^= True
         return gr.Button.update(variant='primary' if PixArtStorage.resolutionBin == True else 'secondary',
                                 value='\U0001D401' if PixArtStorage.resolutionBin == True else '\U0001D539')
+#    def toggleVP ():
+#        if not PixArtStorage.locked:
+#           PixArtStorage.vpred ^= True
+#        return gr.Button.update(variant='primary' if PixArtStorage.vpred == True else 'secondary',
+#                                value='\U0001D415' if PixArtStorage.vpred == True else '\U0001D54D')
 
     def toggleGenerate (R, G, B, A):
         PixArtStorage.noiseRGBA = [R, G, B, A]
+        PixArtStorage.locked = True
         return gr.Button.update(value='...', variant='secondary', interactive=False)
+
+    schedulerList = ["default", "DDPM", "DEIS", "DPM++ 2M", "DPM++ 2M SDE", "DPM", "DPM SDE",
+                     "Euler", "Euler A", "LCM", "SA-solver", "UniPC", ]
+
+    def parsePrompt (positive, negative, width, height, seed, scheduler, steps, cfg, nr, ng, nb, ns):
+        p = positive.split('\n')
+        
+        for l in range(len(p)):
+            if "Prompt: " == str(p[l][0:8]):
+                positive = str(p[l][8:])
+            elif "Prompt" == p[l]:
+                positive = p[l+1]
+                l += 1
+            elif "Negative: " == str(p[l][0:10]):
+                negative = str(p[l][10:])
+            elif "Negative Prompt" == p[l]:
+                negative = p[l+1]
+                l += 1
+            elif "Initial noise: " == str(p[l][0:15]):
+                noiseRGBA = str(p[l][16:-1]).split(',')
+                nr = float(noiseRGBA[0])
+                ng = float(noiseRGBA[1])
+                nb = float(noiseRGBA[2])
+                ns = float(noiseRGBA[3])
+            else:
+                params = p[l].split(',')
+                for k in range(len(params)):
+                    pairs = params[k].strip().split(' ')
+                    attribute = pairs[0]
+                    if "Size:" == attribute:
+                        size = pairs[1].split('x')
+                        width = int(size[0])
+                        height = int(size[1])
+                    elif "Seed:" == attribute:
+                        seed = int(pairs[1])
+                    elif "Sampler:" == attribute:
+                        scheduler = ' '.join(pairs[1:])
+                        if scheduler not in schedulerList:
+                            scheduler = 'default'
+                    elif "Scheduler:" == attribute:
+                        sched = ' '.join(pairs[1:])
+                        if sched in schedulerList:
+                            scheduler = sched
+                    elif "Steps(Prior/Decoder):" == attribute:
+                        steps = str(pairs[1]).split('/')
+                        steps = int(steps[0])
+                    elif "Steps:" == attribute:
+                        steps = int(pairs[1])
+                    elif "CFG" == attribute and "scale:" == pairs[1]:
+                        cfg = float(pairs[2])
+                    elif "CFG:" == attribute:
+                        cfg = float(pairs[1])
+        return positive, negative, width, height, seed, scheduler, steps, cfg, nr, ng, nb, ns
 
     with gr.Blocks() as pixartsigma2_block:
         with ResizeHandleRow():
             with gr.Column():
                 with gr.Row():
                     model = gr.Dropdown(models_list, label='Model', value=defaultModel, type='value', scale=2)
-                    vae = gr.Dropdown(["default", "consistency"], label='VAE', value="default", type='index', scale=1)
-                    scheduler = gr.Dropdown(["default",
-                                             "DDPM",
-                                             "DEIS",
-                                             "DPM++ 2M",
-                                             "DPM++ 2M SDE",
-                                             "DPM",
-                                             "DPM SDE",
-                                             "Euler",
-                                             "Euler A",
-                                             "SA-solver",
-                                             "UniPC",
-                                             ],
+                    access = ToolButton(value='\U0001F917', variant='secondary')
+                    vae = gr.Dropdown(["default", "consistency"], label='VAE', value='default', type='index', scale=1)
+                    scheduler = gr.Dropdown(schedulerList,
                         label='Sampler', value="UniPC", type='value', scale=1)
                     karras = ToolButton(value="\U0001D542", variant='secondary', tooltip="use Karras sigmas")
+#                    vpred = ToolButton(value="\U0001D54D", variant='secondary', tooltip="use v-prediction")
 
-                positive_prompt = gr.Textbox(label='Prompt', placeholder='Enter a prompt here...', default='', lines=2)
+                with gr.Row():
+                    positive_prompt = gr.Textbox(label='Prompt', placeholder='Enter a prompt here...', default='', lines=2)
+                    parse = ToolButton(value="↙️", variant='secondary', tooltip="parse")
 
                 with gr.Row():
                     negative_prompt = gr.Textbox(label='Negative', placeholder='', lines=2)
@@ -635,7 +691,7 @@ def on_ui_tabs():
                     resBin = ToolButton(value="\U0001D401", variant='primary', tooltip="use resolution binning")
 
                 with gr.Row():
-                    guidance_scale = gr.Slider(label='CFG', minimum=1, maximum=8, step=0.5, value=4.0, scale=2, visible=True)
+                    guidance_scale = gr.Slider(label='CFG', minimum=1, maximum=8, step=0.1, value=4.0, scale=2, visible=True)
                     steps = gr.Slider(label='Steps', minimum=1, maximum=60, step=1, value=20, scale=2, visible=True)
                     DMDstep = gr.Slider(label='Timestep for DMD', minimum=1, maximum=999, step=1, value=400, scale=1, visible=False)
                 with gr.Row():
@@ -666,7 +722,7 @@ def on_ui_tabs():
 
             with gr.Column():
                 generate_button = gr.Button(value="Generate", variant='primary', visible=True)
-                output_gallery = gr.Gallery(label='Output', height=shared.opts.gallery_height or None,
+                output_gallery = gr.Gallery(label='Output', height="80vh",
                                             show_label=False, object_fit='contain', visible=True, columns=3, preview=True)
 #   gallery movement buttons don't work, others do
 #   caption not displaying linebreaks, alt text does
@@ -695,7 +751,9 @@ def on_ui_tabs():
             show_progress=False
         )
 
-
+#        vpred.click(toggleVP, inputs=[], outputs=vpred)
+        parse.click(parsePrompt, inputs=[positive_prompt, negative_prompt, width, height, sampling_seed, scheduler, steps, guidance_scale, initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA], outputs=[positive_prompt, negative_prompt, width, height, sampling_seed, scheduler, steps, guidance_scale, initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA], show_progress=False)
+        access.click(toggleAccess, inputs=[], outputs=access)
         karras.click(toggleKarras, inputs=[], outputs=karras)
         resBin.click(toggleResBin, inputs=[], outputs=resBin)
         swapper.click(fn=None, _js="function(){switchWidthHeight('PixArtSigma')}", inputs=None, outputs=None, show_progress=False)
@@ -709,8 +767,8 @@ def on_ui_tabs():
 
         output_gallery.select (fn=getGalleryIndex, inputs=[], outputs=[])
 
-        generate_button.click(toggleGenerate, inputs=[initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA], outputs=[generate_button])
         generate_button.click(predict, inputs=ctrls, outputs=[generate_button, output_gallery])
+        generate_button.click(toggleGenerate, inputs=[initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA], outputs=[generate_button])
 
     return [(pixartsigma2_block, "PixArtSigma", "pixart_sigma")]
 

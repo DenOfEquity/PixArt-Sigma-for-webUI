@@ -38,6 +38,9 @@ Note that Alpha and Sigma both use the same T5 text encoder, my caching system m
 I can generate using all models, though the 2K Sigma model is very slow on my limited hardware. It's undertrained anyway, at present.
 
 ---
+#### 10/07/2024 ####
+* improved yesterday's effort. More compatibility, multi-line, etc.
+
 #### 09/07/2024 ####
 * some code cleanups
 * added prompt parsing to automatically fill in details like seed, steps, etc.

@@ -617,18 +617,54 @@ def on_ui_tabs():
 
     def parsePrompt (positive, negative, width, height, seed, scheduler, steps, cfg, nr, ng, nb, ns):
         p = positive.split('\n')
+        lineCount = len(p)
+
+        negative = ''
         
-        for l in range(len(p)):
-            if "Prompt: " == str(p[l][0:8]):
-                positive = str(p[l][8:])
-            elif "Prompt" == p[l]:
-                positive = p[l+1]
+        if "Prompt" != p[0] and "Prompt: " != p[0][0:8]:               #   civitAI style special case
+            positive = p[0]
+            l = 1
+            while (l < lineCount) and not (p[l][0:17] == "Negative prompt: " or p[l][0:7] == "Steps: "):
+                if p[l] != '':
+                    positive += '\n' + p[l]
                 l += 1
-            elif "Negative: " == str(p[l][0:10]):
-                negative = str(p[l][10:])
-            elif "Negative Prompt" == p[l]:
-                negative = p[l+1]
+        
+        for l in range(lineCount):
+            if "Prompt" == p[l][0:6]:
+                if ": " == p[l][6:8]:                                   #   mine
+                    positive = str(p[l][8:])
+                    c = 1
+                elif "Prompt" == p[l] and (l+1 < lineCount):            #   webUI
+                    positive = p[l+1]
+                    c = 2
+                else:
+                    continue
+
+                while (l+c < lineCount) and not (p[l+c][0:10] == "Negative: " or p[l+c][0:15] == "Negative Prompt" or p[l+c] == "Params" or p[l+c][0:7] == "Steps: "):
+                    if p[l+c] != '':
+                        positive += '\n' + p[l+c]
+                    c += 1
                 l += 1
+
+            elif "Negative" == p[l][0:8]:
+                if ": " == p[l][8:10]:                                  #   mine
+                    negative = str(p[l][10:])
+                    c = 1
+                elif " prompt: " == p[l][8:17]:                         #   civitAI
+                    negative = str(p[l][17:])
+                    c = 1
+                elif " Prompt" == p[l][8:15] and (l+1 < lineCount):     #   webUI
+                    negative = p[l+1]
+                    c = 2
+                else:
+                    continue
+                
+                while (l+c < lineCount) and not (p[l+c] == "Params" or p[l+c][0:7] == "Steps: "):
+                    if p[l+c] != '':
+                        negative += '\n' + p[l+c]
+                    c += 1
+                l += 1
+
             elif "Initial noise: " == str(p[l][0:15]):
                 noiseRGBA = str(p[l][16:-1]).split(',')
                 nr = float(noiseRGBA[0])
@@ -639,30 +675,35 @@ def on_ui_tabs():
                 params = p[l].split(',')
                 for k in range(len(params)):
                     pairs = params[k].strip().split(' ')
-                    attribute = pairs[0]
-                    if "Size:" == attribute:
-                        size = pairs[1].split('x')
-                        width = int(size[0])
-                        height = int(size[1])
-                    elif "Seed:" == attribute:
-                        seed = int(pairs[1])
-                    elif "Sampler:" == attribute:
-                        scheduler = ' '.join(pairs[1:])
-                        if scheduler not in schedulerList:
-                            scheduler = 'default'
-                    elif "Scheduler:" == attribute:
-                        sched = ' '.join(pairs[1:])
-                        if sched in schedulerList:
-                            scheduler = sched
-                    elif "Steps(Prior/Decoder):" == attribute:
-                        steps = str(pairs[1]).split('/')
-                        steps = int(steps[0])
-                    elif "Steps:" == attribute:
-                        steps = int(pairs[1])
-                    elif "CFG" == attribute and "scale:" == pairs[1]:
-                        cfg = float(pairs[2])
-                    elif "CFG:" == attribute:
-                        cfg = float(pairs[1])
+                    match pairs[0]:
+                        case "Size:":
+                            size = pairs[1].split('x')
+                            width = int(size[0])
+                            height = int(size[1])
+                        case "Seed:":
+                            seed = int(pairs[1])
+                        case "Sampler:":
+                            sched = ' '.join(pairs[1:])
+                            if sched in schedulerList:
+                                scheduler = sched
+                        case "Scheduler:":
+                            sched = ' '.join(pairs[1:])
+                            if sched in schedulerList:
+                                scheduler = sched
+                        case "Steps(Prior/Decoder):":
+                            steps = str(pairs[1]).split('/')
+                            steps = int(steps[0])
+                        case "Steps:":
+                            steps = int(pairs[1])
+                        case "CFG":
+                            if "scale:" == pairs[1]:
+                                cfg = float(pairs[2])
+                        case "CFG:":
+                            cfg = float(pairs[1])
+                        case "width:":
+                            width = float(pairs[1])
+                        case "height:":
+                            height = float(pairs[1])
         return positive, negative, width, height, seed, scheduler, steps, cfg, nr, ng, nb, ns
 
     with gr.Blocks() as pixartsigma2_block:

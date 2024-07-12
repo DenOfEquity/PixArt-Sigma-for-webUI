@@ -6,7 +6,19 @@ I don't think there is anything Forge specific here.
 ---
 ## Install ##
 Go to the **Extensions** tab, then **Install from URL**, use the URL for this repository.
+### needs updated *diffusers*, *transformers*, *tokenizers*, and *peft* ###
 
+Easiest way to ensure necessary versions are installed is to edit **requirements.txt** or **requirements_versions.txt** in the webUI folder.
+```
+diffusers>=0.28.1
+tokenizers>=0.19
+transformers==4.40
+peft
+```
+These upgrades didn't break anything for me.
+
+---
+### downloads models on demand - minimum will be ~20Gb ###
 
 ---
 ### screenshot ###
@@ -14,19 +26,6 @@ current UI
 
 ![](screenshot2.png "UI screenshot")
 
-
-
----
-### downloads models on demand - minimum will be ~20Gb ###
-### needs updated *diffusers*, *transformers*, and *tokenizers* ###
-
-Easiest way to ensure necessary versions are installed is to edit **requirements_versions.txt** in the webUI folder.
-```
-diffusers>=0.28.1
-tokenizers>=0.19
-transformers==4.40
-```
-These upgrades didn't break anything for me.
 
 ---
 At your own risk. This is ~~barely~~ ~~moderately~~ somewhat tested, ~~and even then~~ but only on my computer.
@@ -38,6 +37,9 @@ Note that Alpha and Sigma both use the same T5 text encoder, my caching system m
 I can generate using all models, though the 2K Sigma model is very slow on my limited hardware. It's undertrained anyway, at present.
 
 ---
+#### 12/07/2024 ####
+* couple of bugfixes, thanks to @BlipOnNobodysRadar for reports.
+
 #### 10/07/2024 ####
 * improved yesterday's effort. More compatibility, multi-line, etc.
 
@@ -67,7 +69,7 @@ I can generate using all models, though the 2K Sigma model is very slow on my li
 * added button to toggle resolution binning, enabled by default and generally best left enabled IMO. I was testing disabling it for potential hires fix type uses, with some limited success around x1.5 upscale. x2 was messy. Maybe repeated smaller upscales could work, but probably better to send to img2img and use an sdXL checkpoint to upscale.
 
 #### 07/06/2024 ####
-* added [flash diffusion](https://huggingface.co/jasperai/flash-pixart). This is a distilled Lora (211MB) on top of Alpha1024: 4 steps, low CFG (1-2), seems much better than LCM. Forced LCM scheduler.
+* added [flash diffusion](https://huggingface.co/jasperai/flash-pixart). This is a distilled Lora (211MB) on top of Alpha1024: 4 steps, low CFG (1-2), seems much better than LCM. Forced LCM scheduler. Needs **peft** library.
 
 #### 05/06/2024 ####
 * small update to work with diffusers >= 0.28.1 : Transformer2DModel is now PixArtTransformer2DModel

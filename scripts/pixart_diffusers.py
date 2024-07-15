@@ -599,7 +599,7 @@ def on_ui_tabs():
     schedulerList = ["default", "DDPM", "DEIS", "DPM++ 2M", "DPM++ 2M SDE", "DPM", "DPM SDE",
                      "Euler", "Euler A", "LCM", "SA-solver", "UniPC", ]
 
-    def parsePrompt (positive, negative, width, height, seed, scheduler, steps, cfg, guidiance_rescale, guidance_cutoff, nr, ng, nb, ns):
+    def parsePrompt (positive, negative, width, height, seed, scheduler, steps, cfg, guidance_rescale, guidance_cutoff, nr, ng, nb, ns):
         p = positive.split('\n')
         lineCount = len(p)
 

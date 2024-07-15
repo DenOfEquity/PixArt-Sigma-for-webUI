@@ -37,7 +37,7 @@ Note that Alpha and Sigma both use the same T5 text encoder, my caching system m
 I can generate using all models, though the 2K Sigma model is very slow on my limited hardware. It's undertrained anyway, at present.
 
 ---
-####15/07/2024 ####
+#### 15/07/2024 ####
 * added quickset for image dimensions, options update for different models
 
 #### 14/07/2024 ####

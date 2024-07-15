@@ -30,7 +30,6 @@ class PixArtStorage:
     pos_attention = None
     neg_embeds = None
     neg_attention = None
-    denoise = 0.0
     noiseRGBA = [0.0, 0.0, 0.0, 0.0]
     captionToPrompt = False
     sendAccessToken = False
@@ -41,7 +40,9 @@ class PixArtStorage:
 
 
 from transformers import T5EncoderModel, T5Tokenizer
-from diffusers import PixArtSigmaPipeline, PixArtAlphaPipeline, PixArtTransformer2DModel
+from scripts.PixArt_pipeline import PixArtPipeline_DoE_combined
+
+from diffusers import PixArtTransformer2DModel
 from diffusers import AutoencoderKL
 from diffusers import ConsistencyDecoderVAE
 from diffusers import DEISMultistepScheduler, DPMSolverSinglestepScheduler, DPMSolverMultistepScheduler, DPMSolverSDEScheduler
@@ -59,7 +60,7 @@ def quote(text):
     return json.dumps(text, ensure_ascii=False)
 
 # modules/processing.py
-def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, steps, DMDstep, seed, scheduler, width, height):
+def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, guidance_rescale, guidance_cutoff, steps, DMDstep, seed, scheduler, width, height):
     karras = " : Karras" if PixArtStorage.karras == True else ""
     vpred = " : V-Prediction" if PixArtStorage.vpred == True else ""
     isDMD = "PixArt-Alpha-DMD" in model
@@ -68,13 +69,11 @@ def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, ste
         "Seed": seed,
         "Scheduler": f"{scheduler}{karras}{vpred}",
         "Steps": steps if not isDMD else None,
-        "CFG": guidance_scale if not isDMD else None,
+        "CFG": f"{guidance_scale} ({guidance_rescale}) [{guidance_cutoff}]",
         "DMDstep": DMDstep if isDMD else None,
         "RNG": opts.randn_source if opts.randn_source != "GPU" else None
     }
-
-#add i2i marker - effectively just check PixArtStorage.denoise as if =1, no i2i effect
-
+#add i2i marker?
     prompt_text = f"Prompt: {positive_prompt}\n"
     if negative_prompt != "":
         prompt_text += (f"Negative: {negative_prompt}\n")
@@ -83,7 +82,7 @@ def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, ste
 
     return f"Model: {model}\n{prompt_text}{generation_params_text}{noise_text}"
 
-def predict(positive_prompt, negative_prompt, model, vae, width, height, guidance_scale, num_steps, DMDstep, sampling_seed, num_images, scheduler, i2iSource, i2iDenoise, style, *args):
+def predict(positive_prompt, negative_prompt, model, vae, width, height, guidance_scale, guidance_rescale, guidance_cutoff, num_steps, DMDstep, sampling_seed, num_images, scheduler, i2iSource, i2iDenoise, maskSource, maskCutOff, style, *args):
     
     access_token = 0
     if PixArtStorage.sendAccessToken == True:
@@ -100,9 +99,13 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         negative_prompt = styles.styles_list[style][2] + negative_prompt
 
     if i2iSource == None:
+        maskSource = None
         i2iDenoise = 1
     if i2iDenoise < (num_steps + 1) / 1000:
         i2iDenoise = (num_steps + 1) / 1000
+
+    if maskSource == None:
+        maskCutOff = 1.0
 
     from diffusers.utils import logging
     logging.set_verbosity(logging.WARN)       #   download information is useful
@@ -125,10 +128,6 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         isSigma = True
 
     useConsistencyVAE = (isSigma == 0) and (vae == 1)
-
-#    algorithm_type = args.algorithm
-#    beta_schedule = args.beta_schedule
-#    use_lu_lambdas = args.use_lu_lambdas
 
     pipe = None
 
@@ -176,67 +175,24 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 ##        except:
 ##            print ("BetterTransformer not available.")
 
-####    VAEs are same for Alpha, and for Sigma. Sigma already shared, now Alpha is too.
-
-    if useConsistencyVAE:   #   option for Alpha models
-        vae = ConsistencyDecoderVAE.from_pretrained(
-            "openai/consistency-decoder",
-            local_files_only=False, cache_dir=".//models//diffusers//",
-            torch_dtype=torch.float16)
-    else:    
-        cachedVAE = ".//models//diffusers//pixart_T5_fp16//vaeSigma" if isSigma else ".//models//diffusers//pixart_T5_fp16//vaeAlpha"
-        sourceVAE = "PixArt-alpha/pixart_sigma_sdxlvae_T5_diffusers" if isSigma else model
-
-        try:
-            vae = AutoencoderKL.from_pretrained(cachedVAE, variant="fp16", torch_dtype=torch.float16)
-        except:
-            vae = AutoencoderKL.from_pretrained(
-                sourceVAE,
-                local_files_only=False, cache_dir=".//models//diffusers//",
-                subfolder="vae",
-                use_safetensors=True,
-                torch_dtype=torch.float16, )
-
-            ##  now save the converted fp16 T5 model to local cache, only needs done once
-            vae.to(torch.float16)
-            vae.save_pretrained(
-                cachedVAE,
-                safe_serialization=True,
-                variant="fp16", )
-            print ("Saved fp16 " + "Sigma" if isSigma else "Alpha" + " VAE, will use this from now on.")
-
-    vae.enable_tiling(True) #make optional/based on dimensions
 
     logging.set_verbosity(logging.ERROR)       #   avoid some console spam from Alpha models missing keys
 
-
     if isFlash:
-        pipe = PixArtAlphaPipeline.from_pretrained(
-            "PixArt-alpha/PixArt-XL-2-1024-MS",
-            tokenizer=tokenizer,
-            text_encoder=text_encoder,
-            transformer=None,
-            vae=vae,
-            torch_dtype=torch.float16, )        
+        pipeModel = "PixArt-alpha/PixArt-XL-2-1024-MS"
     elif isSigma:
-        pipe = PixArtSigmaPipeline.from_pretrained(
-            "PixArt-alpha/pixart_sigma_sdxlvae_T5_diffusers",
-            local_files_only=False, cache_dir=".//models//diffusers//",
-            tokenizer=tokenizer,
-            text_encoder=text_encoder,
-            transformer=None,
-            vae=vae,
-            torch_dtype=torch.float16, )
+        pipeModel = "PixArt-alpha/pixart_sigma_sdxlvae_T5_diffusers"
     else:
-        pipe = PixArtAlphaPipeline.from_pretrained(
-            model,
-            tokenizer=tokenizer,
-            text_encoder=text_encoder,
-            transformer=None,
-            vae=vae,
-            torch_dtype=torch.float16, )
+        pipeModel = model
 
-    del vae
+    pipe = PixArtPipeline_DoE_combined.from_pretrained(
+        pipeModel,
+        tokenizer=tokenizer,
+        text_encoder=text_encoder,
+        transformer=None,
+        vae=None,
+        torch_dtype=torch.float16, )
+    del tokenizer, text_encoder
 
     if isDMD:
         negative_prompt = ""
@@ -244,9 +200,9 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
     if useCachedEmbeds == False:
         pos_embeds, pos_attention, neg_embeds, neg_attention = pipe.encode_prompt(positive_prompt, negative_prompt=negative_prompt)
 
+        del pipe.tokenizer, pipe.text_encoder
         pipe.tokenizer = None
         pipe.text_encoder = None
-        del tokenizer, text_encoder
 
         PixArtStorage.pos_embeds    = pos_embeds.to('cuda').to(torch.float16)
         PixArtStorage.neg_embeds    = neg_embeds.to('cuda').to(torch.float16)
@@ -302,19 +258,48 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 ##        config=None,
 ##        local_files_only=True)
 
+####    VAEs are same for Alpha, and for Sigma. Sigma already shared, now Alpha is too.
+
+    if useConsistencyVAE:   #   option for Alpha models
+        pipe.vae = ConsistencyDecoderVAE.from_pretrained(
+            "openai/consistency-decoder",
+            local_files_only=False, cache_dir=".//models//diffusers//",
+            torch_dtype=torch.float16)
+    else:    
+        cachedVAE = ".//models//diffusers//pixart_T5_fp16//vaeSigma" if isSigma else ".//models//diffusers//pixart_T5_fp16//vaeAlpha"
+        sourceVAE = "PixArt-alpha/pixart_sigma_sdxlvae_T5_diffusers" if isSigma else model
+
+        try:
+            pipe.vae = AutoencoderKL.from_pretrained(cachedVAE, variant="fp16", torch_dtype=torch.float16)
+        except:
+            vae = AutoencoderKL.from_pretrained(
+                sourceVAE,
+                local_files_only=False, cache_dir=".//models//diffusers//",
+                subfolder="vae",
+                use_safetensors=True,
+                torch_dtype=torch.float16, )
+
+            ##  now save the converted fp16 T5 model to local cache, only needs done once
+            vae.to(torch.float16)
+            vae.save_pretrained(
+                cachedVAE,
+                safe_serialization=True,
+                variant="fp16", )
+            print ("Saved fp16 " + "Sigma" if isSigma else "Alpha" + " VAE, will use this from now on.")
+            pipe.vae = vae
+            del vae
+
+#    pipe.vae.enable_tiling(True) #make optional/based on dimensions
+
     pipe.enable_model_cpu_offload()
 
     #   if using resolution_binning, must use adjusted width/height here (don't overwrite values)
-    #   always generate the noise here
-    generator = [torch.Generator(device='cpu').manual_seed(fixed_seed+i) for i in range(num_images)]
 
     if PixArtStorage.resolutionBin:
-        from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import (
+        from scripts.PixArt_pipeline import (
             ASPECT_RATIO_256_BIN,
             ASPECT_RATIO_512_BIN,
             ASPECT_RATIO_1024_BIN,
-        )
-        from diffusers.pipelines.pixart_alpha.pipeline_pixart_sigma import (
             ASPECT_RATIO_2048_BIN,
         )
 
@@ -344,7 +329,12 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         int(twidth) // pipe.vae_scale_factor,
     )
 
+    #   always generate the noise here
+    generator = [torch.Generator(device='cpu').manual_seed(fixed_seed+i) for i in range(num_images)]
     latents = randn_tensor(shape, generator=generator).to('cuda').to(torch.float16)
+    #regen the generator otherwise results between batch/single will be different
+    del generator
+    generator = torch.Generator(device='cpu').manual_seed(fixed_seed)
 
     #   colour the initial noise
     if PixArtStorage.noiseRGBA[3] != 0.0:
@@ -376,20 +366,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         del imageR, imageG, imageB, image, image_latents
     #   end: colour the initial noise
 
-    if i2iSource != None:
-        i2iSource = i2iSource.resize((twidth, theight))
 
-        image = pipe.image_processor.preprocess(i2iSource).to('cuda').to(torch.float16)
-        image_latents = pipe.vae.encode(image).latent_dist.sample(generator) * pipe.vae.config.scaling_factor * pipe.scheduler.init_noise_sigma
-        image_latents = image_latents.repeat(num_images, 1, 1, 1)
-
-        pipe.scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
-        ts = torch.tensor([int(1000 * i2iDenoise) - 1], device='cpu')
-        ts = ts[:1].repeat(num_images)
-
-        latents = pipe.scheduler.add_noise(image_latents, latents, ts)
-
-        del image, image_latents, i2iSource
 
     timesteps = None
 
@@ -449,14 +426,19 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 
     with torch.inference_mode():
         output = pipe(
-            negative_prompt                 = None,                             #   necessary
             generator                       = generator,
-            latents                         = latents,
+            latents                         = latents,                          #   initial noise, possibly with colour biasing
+            image                           = i2iSource,
+            mask_image                      = maskSource,
+            strength                        = i2iDenoise,
+            mask_cutoff                     = maskCutOff,
             num_inference_steps             = num_steps,
             num_images_per_prompt           = num_images,
             height                          = height,
             width                           = width,
             guidance_scale                  = guidance_scale,
+            guidance_rescale                = guidance_rescale,
+            guidance_cutoff                 = guidance_cutoff,
             prompt_embeds                   = PixArtStorage.pos_embeds,
             negative_prompt_embeds          = PixArtStorage.neg_embeds,
             prompt_attention_mask           = PixArtStorage.pos_attention,
@@ -464,6 +446,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
             use_resolution_binning          = PixArtStorage.resolutionBin,
             timesteps                       = timesteps,
             output_type                     = "pil",
+            isSigma                         = isSigma,
         ).images
 
 #   vae uses lots of VRAM, especially with batches, maybe worth output to latent, free memory
@@ -479,7 +462,8 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         info=create_infotext(
             model,
             positive_prompt, negative_prompt,
-            guidance_scale, num_steps, DMDstep,
+            guidance_scale, guidance_rescale, guidance_cutoff,
+            num_steps, DMDstep,
             fixed_seed, scheduler,
             width, height)
 
@@ -615,7 +599,7 @@ def on_ui_tabs():
     schedulerList = ["default", "DDPM", "DEIS", "DPM++ 2M", "DPM++ 2M SDE", "DPM", "DPM SDE",
                      "Euler", "Euler A", "LCM", "SA-solver", "UniPC", ]
 
-    def parsePrompt (positive, negative, width, height, seed, scheduler, steps, cfg, nr, ng, nb, ns):
+    def parsePrompt (positive, negative, width, height, seed, scheduler, steps, cfg, guidiance_rescale, guidance_cutoff, nr, ng, nb, ns):
         p = positive.split('\n')
         lineCount = len(p)
 
@@ -700,11 +684,45 @@ def on_ui_tabs():
                                 cfg = float(pairs[2])
                         case "CFG:":
                             cfg = float(pairs[1])
+                            if len(pairs) == 4:
+                                guidance_rescale = float(pairs[2].strip('\(\)'))
+                                guidance_cutoff = float(pairs[3].strip('\[\]'))
                         case "width:":
                             width = float(pairs[1])
                         case "height:":
                             height = float(pairs[1])
-        return positive, negative, width, height, seed, scheduler, steps, cfg, nr, ng, nb, ns
+        return positive, negative, width, height, seed, scheduler, steps, cfg, guidance_rescale, guidance_cutoff, nr, ng, nb, ns
+
+
+    resolutionList256 = [
+        (512, 128),     (432, 144),     (352, 176),     (320, 196),     (304, 208),
+        (256, 256), 
+        (208, 304),     (196, 320),     (176, 352),     (144, 432),     (128, 512)
+    ]
+    resolutionList512 = [
+        (1024, 256),    (864, 288),     (704, 352),     (640, 384),     (608, 416),
+        (512, 512), 
+        (416, 608),     (384, 640),     (352, 704),     (288, 864),     (256, 1024)
+    ]
+    resolutionList1024 = [
+        (2048, 512),    (1728, 576),    (1408, 704),    (1280, 768),    (1216, 832),
+        (1024, 1024),
+        (832, 1216),    (768, 1280),    (704, 1408),    (576, 1728),    (512, 2048)
+    ]
+    resolutionList2048 = [
+        (4096, 1024),   (3456, 1152),   (2816, 1408),   (2560, 1536),   (2432, 1664),
+        (2048, 2048),
+        (1664, 2432),   (1536, 2560),   (1408, 2816),   (1152, 3456),   (1024, 4096)
+    ]
+
+
+    def updateWH (dims, w, h):
+        #   returns None to dimensions dropdown so that it doesn't show as being set to particular values
+        #   width/height could be manually changed, making that display inaccurate and preventing immediate reselection of that option
+        #   passing by value because of odd gradio bug? when using index can either update displayed list correctly, or get values correctly, not both
+        wh = dims.split('\u00D7')
+        return None, int(wh[0]), int(wh[1])
+
 
     with gr.Blocks() as pixartsigma2_block:
         with ResizeHandleRow():
@@ -730,12 +748,16 @@ def on_ui_tabs():
                     swapper = ToolButton(value="\U000021C4")
                     height = gr.Slider(label='Height', minimum=128, maximum=4096, step=8, value=defaultHeight, elem_id="PixArtSigma_height")
                     resBin = ToolButton(value="\U0001D401", variant='primary', tooltip="use resolution binning")
+                    dims = gr.Dropdown([f'{i} \u00D7 {j}' for i,j in resolutionList1024],
+                                        label='Quickset', type='value', scale=0)
 
                 with gr.Row():
-                    guidance_scale = gr.Slider(label='CFG', minimum=1, maximum=8, step=0.1, value=4.0, scale=2, visible=True)
-                    steps = gr.Slider(label='Steps', minimum=1, maximum=60, step=1, value=20, scale=2, visible=True)
-                    DMDstep = gr.Slider(label='Timestep for DMD', minimum=1, maximum=999, step=1, value=400, scale=1, visible=False)
+                    guidance_scale = gr.Slider(label='CFG', minimum=1, maximum=8, step=0.1, value=4.0, scale=1, visible=True)
+                    guidance_rescale = gr.Slider(label='rescale CFG', minimum=0.00, maximum=1.0, step=0.01, value=0.0, precision=0.01, scale=1)
+                    guidance_cutoff = gr.Slider(label='CFG cutoff after step', minimum=0.00, maximum=1.0, step=0.01, value=1.0, precision=0.01, scale=1)
+                    DMDstep = gr.Slider(label='Timestep for DMD', minimum=1, maximum=999, step=1, value=400, scale=2, visible=False)
                 with gr.Row():
+                    steps = gr.Slider(label='Steps', minimum=1, maximum=60, step=1, value=20, scale=2, visible=True)
                     sampling_seed = gr.Number(label='Seed', value=-1, precision=0, scale=1)
                     random = ToolButton(value="\U0001f3b2\ufe0f")
                     reuseSeed = ToolButton(value="\u267b\ufe0f")
@@ -751,6 +773,7 @@ def on_ui_tabs():
                 with gr.Accordion(label='image to image', open=False):
                     with gr.Row():
                         i2iSource = gr.Image(label='image to image source', sources=['upload'], type='pil', interactive=True, show_download_button=False)
+                        maskSource = gr.Image(label='source mask', sources=['upload'], type='pil', interactive=True, show_download_button=False)
                         with gr.Column():
                             i2iDenoise = gr.Slider(label='Denoise', minimum=0.00, maximum=1.0, step=0.01, value=0.5)
                             i2iSetWH = gr.Button(value='Set Width / Height from image')
@@ -758,8 +781,11 @@ def on_ui_tabs():
                             with gr.Row():
                                 i2iCaption = gr.Button(value='Caption this image (Florence-2)', scale=9)
                                 toPrompt = ToolButton(value='P', variant='secondary')
+                            maskCut = gr.Slider(label='Ignore Mask after step', minimum=0.00, maximum=1.0, step=0.01, value=1.0)
 
-                ctrls = [positive_prompt, negative_prompt, model, vae, width, height, guidance_scale, steps, DMDstep, sampling_seed, batch_size, scheduler, i2iSource, i2iDenoise, style]
+                ctrls = [positive_prompt, negative_prompt, model, vae, width, height, guidance_scale, guidance_rescale, guidance_cutoff, steps, DMDstep, sampling_seed, batch_size, scheduler, i2iSource, i2iDenoise, maskSource, maskCut, style]
+                
+                parseCtrls = [positive_prompt, negative_prompt, width, height, sampling_seed, scheduler, steps, guidance_scale, guidance_rescale, guidance_cutoff, initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA]
 
             with gr.Column():
                 generate_button = gr.Button(value="Generate", variant='primary', visible=True)
@@ -779,21 +805,39 @@ def on_ui_tabs():
                     ))
 
 
-        def show_steps(m):
-            if "PixArt-Alpha-DMD" in m:
-                return gr.update(visible=False), gr.update(visible=False), gr.update(visible=True)
+        def show_steps(model):
+            if "PixArt-Alpha-DMD" in model:
+                return gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(interactive=False), gr.update(visible=True)
             else:
-                return gr.update(visible=True), gr.update(visible=True), gr.update(visible=False)
+                return gr.update(visible=True),  gr.update(visible=True),  gr.update(visible=True),  gr.update(interactive=True),  gr.update(visible=False)
+        def set_dims(model):
+            if "256" in model:
+                resList = resolutionList256
+            elif "512" in model:
+                resList = resolutionList512
+            elif "2K" in model or "2048" in model:
+                resList = resolutionList2048
+            else:
+                resList = resolutionList1024
+
+            choices = [f'{i} \u00D7 {j}' for i,j in resList]
+            return gr.update(choices=choices)
 
         model.change(
             fn=show_steps,
             inputs=model,
-            outputs=[guidance_scale, steps, DMDstep],
+            outputs=[guidance_scale, guidance_rescale, guidance_cutoff, steps, DMDstep],
             show_progress=False
         )
-
+        model.change(
+            fn=set_dims,
+            inputs=model,
+            outputs=dims,
+            show_progress=False
+        )
 #        vpred.click(toggleVP, inputs=[], outputs=vpred)
-        parse.click(parsePrompt, inputs=[positive_prompt, negative_prompt, width, height, sampling_seed, scheduler, steps, guidance_scale, initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA], outputs=[positive_prompt, negative_prompt, width, height, sampling_seed, scheduler, steps, guidance_scale, initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA], show_progress=False)
+        dims.input(updateWH, inputs=[dims, width, height], outputs=[dims, width, height], show_progress=False)
+        parse.click(parsePrompt, inputs=parseCtrls, outputs=parseCtrls, show_progress=False)
         access.click(toggleAccess, inputs=[], outputs=access)
         karras.click(toggleKarras, inputs=[], outputs=karras)
         resBin.click(toggleResBin, inputs=[], outputs=resBin)

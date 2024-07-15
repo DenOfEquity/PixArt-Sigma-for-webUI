@@ -24,7 +24,7 @@ These upgrades didn't break anything for me.
 ### screenshot ###
 current UI
 
-![](screenshot2.png "UI screenshot")
+![](screenshot3.png "UI screenshot")
 
 
 ---
@@ -37,6 +37,16 @@ Note that Alpha and Sigma both use the same T5 text encoder, my caching system m
 I can generate using all models, though the 2K Sigma model is very slow on my limited hardware. It's undertrained anyway, at present.
 
 ---
+####15/07/2024 ####
+* added quickset for image dimensions, options update for different models
+
+#### 14/07/2024 ####
+Many changes, hopefully not many bugs too:
+* made my own pipeline, combining Alpha and Sigma pipelines and enabling the following additions
+* added rescaleCFG
+* added CFG cutoff (disable CFG after some number of steps - faster processing, impact on image quality depends on cutoff point but can be minimal)
+* added mask for image to image
+
 #### 12/07/2024 ####
 * couple of bugfixes, thanks to @BlipOnNobodysRadar for reports.
 

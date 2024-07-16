@@ -282,7 +282,7 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):#maybe PAGMixin
         )
         self.image_processor = PixArtImageProcessor(vae_scale_factor=self.vae_scale_factor)
         self.mask_processor  = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor, vae_latent_channels=self.latent_channels, 
-                                                 do_normalize=False, do_binarize=False, do_convert_grayscale=True)
+                                                 do_resize=False, do_normalize=False, do_binarize=False, do_convert_grayscale=True)
 
     # Adapted from diffusers.pipelines.deepfloyd_if.pipeline_if.encode_prompt
     def encode_prompt(
@@ -613,7 +613,7 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):#maybe PAGMixin
 
             if mask_image is not None:
                 # 5.1. Prepare masked latent variables
-                mask = self.mask_processor.preprocess(mask_image, height=height//8, width=width//8).to(device='cuda', dtype=torch.float16)
+                mask = self.mask_processor.preprocess(mask_image.resize((width//8, height//8))).to(device='cuda', dtype=torch.float16)
 
         # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)

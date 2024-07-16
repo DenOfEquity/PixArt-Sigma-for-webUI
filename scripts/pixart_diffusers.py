@@ -107,6 +107,10 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
     if maskSource == None:
         maskCutOff = 1.0
 
+    if PixArtStorage.resolutionBin == False:
+        width  = (width  // 16) * 16
+        height = (height // 16) * 16
+
     from diffusers.utils import logging
     logging.set_verbosity(logging.WARN)       #   download information is useful
 
@@ -744,9 +748,9 @@ def on_ui_tabs():
                     negative_prompt = gr.Textbox(label='Negative', placeholder='', lines=2)
                     style = gr.Dropdown([x[0] for x in styles.styles_list], label='Style', value="(None)", type='index', scale=0)
                 with gr.Row():
-                    width = gr.Slider(label='Width', minimum=128, maximum=4096, step=8, value=defaultWidth, elem_id="PixArtSigma_width")
+                    width = gr.Slider(label='Width', minimum=128, maximum=4096, step=16, value=defaultWidth, elem_id="PixArtSigma_width")
                     swapper = ToolButton(value="\U000021C4")
-                    height = gr.Slider(label='Height', minimum=128, maximum=4096, step=8, value=defaultHeight, elem_id="PixArtSigma_height")
+                    height = gr.Slider(label='Height', minimum=128, maximum=4096, step=16, value=defaultHeight, elem_id="PixArtSigma_height")
                     resBin = ToolButton(value="\U0001D401", variant='primary', tooltip="use resolution binning")
                     dims = gr.Dropdown([f'{i} \u00D7 {j}' for i,j in resolutionList1024],
                                         label='Quickset', type='value', scale=0)

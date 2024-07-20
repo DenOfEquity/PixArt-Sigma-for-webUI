@@ -510,12 +510,6 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 
 
 def on_ui_tabs():
-    from importlib import reload
-    reload(models)
-    reload(pipeline)
-    reload(controlnet)
-    
-    
     models_list = models.models_list_alpha + models.models_list_sigma
     defaultModel = models.defaultModel
     defaultWidth = models.defaultWidth

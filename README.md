@@ -1,7 +1,7 @@
 ## PixArt Sigma (and Alpha) for webui ##
 ### Forge tested, probably A1111 too ###
 I don't think there is anything Forge specific here.
-### works for me <sup>TM</sup> on 8Gb VRAM, 16Gb RAM (GTX1070) ###
+### works for me <sup>TM</sup> on 8GB VRAM, 16GB RAM (GTX1070) ###
 
 ---
 ## Install ##
@@ -18,18 +18,18 @@ peft
 These upgrades didn't break anything for me.
 
 ---
-### downloads models on demand - minimum will be ~20Gb ###
+### downloads models on demand - minimum will be ~20GB ###
 
 ---
 ### screenshot ###
-current UI
+almost current UI
 
 ![](screenshot3.png "UI screenshot")
 
 
 ---
 At your own risk. This is ~~barely~~ ~~moderately~~ somewhat tested, ~~and even then~~ but only on my computer.
-Models will be downloaded automatically, on demand (so if you never generate with the 256 model, it'll never be downloaded). The T5 text encoder is around 18Gb and the image models are about 2.3Gb each.
+Models will be downloaded automatically, on demand (so if you never generate with the 256 model, it'll never be downloaded). The T5 text encoder is around 18Gb and the image models are about 2.3GB each.
 The models include the float32 T5 model, which I convert to fp16 on first use and save the result for all future runs. This conversion and saving is automatic. Once done, the full size float32 model could be deleted to reclaim some space.
 
 Note that Alpha and Sigma both use the same T5 text encoder, my caching system means it should only be downloaded once regardless for how many models are used.
@@ -37,6 +37,9 @@ Note that Alpha and Sigma both use the same T5 text encoder, my caching system m
 I can generate using all models, though the 2K Sigma model is very slow on my limited hardware. It's undertrained anyway, at present.
 
 ---
+#### 19/07/2024 ####
+* added controlnet. Currently only HED edge exists, and only for Alpha. Model downloaded automatically (~1.1GB). Initial code pillaged from @raulc0399, added start/stop steps and strength control. Control image must be pre-processed: you can use the controlnet extension in the normal webui txt2img interface. You may need to fully restart the server after installation.
+
 #### 15/07/2024 ####
 * added quickset for image dimensions, options update for different models
 

@@ -33,6 +33,7 @@ from diffusers.utils import (
 )
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline, ImagePipelineOutput
+from scripts.controlnet_pixart import PixArtControlNetAdapterModel, PixArtControlNetTransformerModel
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -263,11 +264,12 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):#maybe PAGMixin
         vae: AutoencoderKL,
         transformer: PixArtTransformer2DModel,
         scheduler: DPMSolverMultistepScheduler,
+        controlnet: PixArtControlNetAdapterModel,        
     ):
         super().__init__()
-
+        
         self.register_modules(
-            tokenizer=tokenizer, text_encoder=text_encoder, vae=vae, transformer=transformer, scheduler=scheduler
+            tokenizer=tokenizer, text_encoder=text_encoder, vae=vae, transformer=transformer, scheduler=scheduler, controlnet=controlnet
         )
 
         self.vae_scale_factor = (
@@ -283,7 +285,6 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):#maybe PAGMixin
         self.image_processor = PixArtImageProcessor(vae_scale_factor=self.vae_scale_factor)
         self.mask_processor  = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor, vae_latent_channels=self.latent_channels, 
                                                  do_resize=False, do_normalize=False, do_binarize=False, do_convert_grayscale=True)
-
     # Adapted from diffusers.pipelines.deepfloyd_if.pipeline_if.encode_prompt
     def encode_prompt(
         self,
@@ -542,11 +543,15 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):#maybe PAGMixin
         strength: float = 0.6,
         mask_image: PipelineImageInput = None,
         mask_cutoff: float = 1.0,
+        control_image: PipelineImageInput = None,
+        controlnet_conditioning_scale: float = 1.0,
+        control_guidance_start: float = 0.0,
+        control_guidance_end: float = 1.0,
+
         **kwargs,
     ) -> Union[ImagePipelineOutput, Tuple]:
 
         doDiffDiff = True if (image and mask_image) else False
-
 
         # 0.01 repeat prompt embeds to match num_images_per_prompt
         prompt_embeds = prompt_embeds.repeat(num_images_per_prompt, 1, 1)
@@ -615,6 +620,21 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):#maybe PAGMixin
                 # 5.1. Prepare masked latent variables
                 mask = self.mask_processor.preprocess(mask_image.resize((width//8, height//8))).to(device='cuda', dtype=torch.float16)
 
+        if self.controlnet != None and control_image is not None:
+            control_image = self.image_processor.preprocess(control_image.resize((width, height))).to(device='cuda', dtype=torch.float16)
+            control_latents = self.vae.encode(control_image).latent_dist.sample() * self.vae.config.scaling_factor
+            del control_image
+            control_latents = control_latents.repeat(num_images_per_prompt, 1, 1, 1)
+            if do_classifier_free_guidance:
+                control_latents = torch.cat([control_latents] * 2)
+            # change to the controlnet transformer model
+            self.transformer = PixArtControlNetTransformerModel(
+                transformer=self.transformer,
+                controlnet=self.controlnet,
+            ).to('cuda')
+        else:
+            control_latents = None
+
         # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
@@ -640,7 +660,7 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):#maybe PAGMixin
             for i, t in enumerate(timesteps):
 
                 if doDiffDiff and float((i+1) / num_timesteps) <= mask_cutoff:
-                    tmask = (mask >= float((i+1) / num_timesteps)).repeat(num_images_per_prompt, 1, 1, 1)
+                    tmask = (mask >= float((i+1) / num_timesteps))
                     ts = torch.tensor([t], device='cuda')
                     ts = ts[:1].repeat(num_images_per_prompt)
                     init_latents_proper = self.scheduler.add_noise(image_latents, noise, ts)
@@ -655,7 +675,8 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):#maybe PAGMixin
                         resolution = resolution[num_images_per_prompt:]
                         aspect_ratio = aspect_ratio[num_images_per_prompt:]
                         added_cond_kwargs = {"resolution": resolution, "aspect_ratio": aspect_ratio}
-
+                    if control_latents is not None:
+                        control_latents = control_latents[num_images_per_prompt:]
 
                 latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
@@ -676,14 +697,33 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):#maybe PAGMixin
                 current_timestep = current_timestep.expand(latent_model_input.shape[0])
 
                 # predict noise model_output
-                noise_pred = self.transformer(
-                    latent_model_input,
-                    encoder_hidden_states=prompt_embeds,
-                    encoder_attention_mask=prompt_attention_mask,
-                    timestep=current_timestep,
-                    added_cond_kwargs=added_cond_kwargs,
-                    return_dict=False,
-                )[0]
+                if float((i+1) / num_timesteps) < control_guidance_start:
+                    control_cond = None
+                elif float((i+1) / num_timesteps) > control_guidance_end:
+                    control_cond = None
+                else:
+                    control_cond = control_latents
+                
+                if control_cond is not None:
+                    noise_pred = self.transformer(
+                        latent_model_input,
+                        encoder_hidden_states=prompt_embeds,
+                        encoder_attention_mask=prompt_attention_mask,
+                        timestep=current_timestep,
+                        controlnet_cond=control_cond,
+                        controlnet_conditioning_scale=controlnet_conditioning_scale,
+                        added_cond_kwargs=added_cond_kwargs,
+                        return_dict=False,
+                    )[0]
+                else:
+                    noise_pred = self.transformer(
+                        latent_model_input,
+                        encoder_hidden_states=prompt_embeds,
+                        encoder_attention_mask=prompt_attention_mask,
+                        timestep=current_timestep,
+                        added_cond_kwargs=added_cond_kwargs,
+                        return_dict=False,
+                    )[0]
 
                 # perform guidance
                 if do_classifier_free_guidance:
@@ -712,6 +752,12 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):#maybe PAGMixin
                     if callback is not None and i % callback_steps == 0:
                         step_idx = i // getattr(self.scheduler, "order", 1)
                         callback(step_idx, t, latents)
+
+        if doDiffDiff and 1.0 <= mask_cutoff:
+            tmask = (mask >= 1.0)
+            latents = (image_latents * ~tmask) + (latents * tmask)
+
+        del control_latents
 
         if not output_type == "latent":
             image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]

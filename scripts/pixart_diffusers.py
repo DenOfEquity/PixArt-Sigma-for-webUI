@@ -12,7 +12,6 @@ from modules.ui_components import ResizeHandleRow, ToolButton
 import modules.infotext_utils as parameters_copypaste
 import gradio as gr
 
-from PIL import Image
 #workaround for unnecessary flash_attn requirement for Florence-2
 from unittest.mock import patch
 from transformers.dynamic_module_utils import get_imports
@@ -20,6 +19,8 @@ from transformers import AutoProcessor, AutoModelForCausalLM
 
 import customStylesListPA as styles
 import modelsListPA as models
+import scripts.PixArt_pipeline as pipeline
+import scripts.controlnet_pixart as controlnet
 
 class PixArtStorage:
     lastSeed = -1
@@ -40,7 +41,7 @@ class PixArtStorage:
 
 
 from transformers import T5EncoderModel, T5Tokenizer
-from scripts.PixArt_pipeline import PixArtPipeline_DoE_combined
+#from scripts.PixArt_pipeline import PixArtPipeline_DoE_combined
 
 from diffusers import PixArtTransformer2DModel
 from diffusers import AutoencoderKL
@@ -82,7 +83,7 @@ def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, gui
 
     return f"Model: {model}\n{prompt_text}{generation_params_text}{noise_text}"
 
-def predict(positive_prompt, negative_prompt, model, vae, width, height, guidance_scale, guidance_rescale, guidance_cutoff, num_steps, DMDstep, sampling_seed, num_images, scheduler, i2iSource, i2iDenoise, maskSource, maskCutOff, style, *args):
+def predict(positive_prompt, negative_prompt, model, vae, width, height, guidance_scale, guidance_rescale, guidance_cutoff, num_steps, DMDstep, sampling_seed, num_images, scheduler, i2iSource, i2iDenoise, maskSource, maskCutOff, style, controlNetImage, controlNet, controlNetStrength, controlNetStart, controlNetEnd, *args):
     
     access_token = 0
     if PixArtStorage.sendAccessToken == True:
@@ -93,6 +94,27 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
             print ("PixArt: couldn't load 'huggingface_access_token.txt' from the webui directory. Will not be able to download/update gated models. Local cache will work.")
 
     torch.set_grad_enabled(False)
+
+    ####    identify model type based on name
+    isFlash = "flash-pixart" in model
+    isSigma = "PixArt-Sigma" in model
+    isDMD = "PixArt-Alpha-DMD" in model
+    isLCM = "PixArt-LCM" in model
+
+    if model in models.models_list_alpha:
+        isSigma = False
+    if model in models.models_list_sigma:
+        isSigma = True
+
+    useConsistencyVAE = (isSigma == 0) and (vae == 1)
+
+    if not isSigma and controlNet != 0 and controlNetImage != None and controlNetStrength > 0.0:
+        useControlNet = ['raulc0399/pixart-alpha-hed-controlnet'][controlNet-1]
+    else:
+        controlNetImage = None
+        controlNetStrength = 0.0
+        useControlNet = None
+
 
     if style != 0:
         positive_prompt = styles.styles_list[style][1].replace("{prompt}", positive_prompt)
@@ -120,18 +142,6 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
     fixed_seed = get_fixed_seed(sampling_seed)
     PixArtStorage.lastSeed = fixed_seed
 
-    ####    identify model type basde on name
-    isFlash = "flash-pixart" in model
-    isSigma = "PixArt-Sigma" in model
-    isDMD = "PixArt-Alpha-DMD" in model
-    isLCM = "PixArt-LCM" in model
-
-    if model in models.models_list_alpha:
-        isSigma = False
-    if model in models.models_list_sigma:
-        isSigma = True
-
-    useConsistencyVAE = (isSigma == 0) and (vae == 1)
 
     pipe = None
 
@@ -189,12 +199,13 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
     else:
         pipeModel = model
 
-    pipe = PixArtPipeline_DoE_combined.from_pretrained(
+    pipe = pipeline.PixArtPipeline_DoE_combined.from_pretrained(
         pipeModel,
         tokenizer=tokenizer,
         text_encoder=text_encoder,
         transformer=None,
         vae=None,
+        controlnet=None,
         torch_dtype=torch.float16, )
     del tokenizer, text_encoder
 
@@ -245,7 +256,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 #                low_cpu_mem_usage=False,
 #                device_map=None, 
                 token=access_token,
-                )
+            )
 #            config=base)
         except:
             print ("PixArt: failed to load transformer. Repository may be gated and require a huggingface access token. See 'README.md'.")
@@ -253,14 +264,15 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
             return gr.Button.update(value='Generate', variant='primary', interactive=True), None
 
 ##    # LoRA model -can't find examples in necessary form
-##    loraLocation = ".//models//diffusers//PixArtLora"
-##    loraName = "Wednesday.safetensors"
-##    transformer = PeftModel.from_single_file(
-##        transformer,
-##        loraLocation,
-##        adapter_name=loraName,
-##        config=None,
-##        local_files_only=True)
+    # loraLocation = ".//models//diffusers//PixArtLora//Wednesday.safetensors"
+    # loraName = "Wednesday.safetensors"
+    # pipe.transformer = PeftModel.from_pretrained(
+        # pipe.transformer,
+        # loraLocation,
+        # adapter_name=loraName,
+        # config=None,
+        # local_files_only=True
+    # )
 
 ####    VAEs are same for Alpha, and for Sigma. Sigma already shared, now Alpha is too.
 
@@ -271,50 +283,49 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
             torch_dtype=torch.float16)
     else:    
         cachedVAE = ".//models//diffusers//pixart_T5_fp16//vaeSigma" if isSigma else ".//models//diffusers//pixart_T5_fp16//vaeAlpha"
-        sourceVAE = "PixArt-alpha/pixart_sigma_sdxlvae_T5_diffusers" if isSigma else model
+        sourceVAE = "PixArt-alpha/pixart_sigma_sdxlvae_T5_diffusers" if isSigma else "PixArt-alpha/PixArt-XL-2-1024-MS"
 
         try:
-            pipe.vae = AutoencoderKL.from_pretrained(cachedVAE, variant="fp16", torch_dtype=torch.float16)
+            pipe.vae = AutoencoderKL.from_pretrained(cachedVAE, local_files_only=True, variant="fp16", torch_dtype=torch.float16)
         except:
-            vae = AutoencoderKL.from_pretrained(
+            pipe.vae = AutoencoderKL.from_pretrained(
                 sourceVAE,
                 local_files_only=False, cache_dir=".//models//diffusers//",
                 subfolder="vae",
                 use_safetensors=True,
                 torch_dtype=torch.float16, )
 
-            ##  now save the converted fp16 T5 model to local cache, only needs done once
-            vae.to(torch.float16)
-            vae.save_pretrained(
+            ##  now save the converted fp16 VAE model to local cache, only needs done once
+            pipe.vae.to(torch.float16)
+            pipe.vae.save_pretrained(
                 cachedVAE,
                 safe_serialization=True,
                 variant="fp16", )
-            print ("Saved fp16 " + "Sigma" if isSigma else "Alpha" + " VAE, will use this from now on.")
-            pipe.vae = vae
-            del vae
+            print ("Saved fp16 " + ("Sigma" if isSigma else "Alpha") + " VAE, will use this from now on.")
 
 #    pipe.vae.enable_tiling(True) #make optional/based on dimensions
+
+    if useControlNet:
+        pipe.controlnet=controlnet.PixArtControlNetAdapterModel.from_pretrained(
+            useControlNet,
+            cache_dir=".//models//diffusers//",
+            use_safetensors=True,
+            torch_dtype=torch.float16
+        )
 
     pipe.enable_model_cpu_offload()
 
     #   if using resolution_binning, must use adjusted width/height here (don't overwrite values)
 
     if PixArtStorage.resolutionBin:
-        from scripts.PixArt_pipeline import (
-            ASPECT_RATIO_256_BIN,
-            ASPECT_RATIO_512_BIN,
-            ASPECT_RATIO_1024_BIN,
-            ASPECT_RATIO_2048_BIN,
-        )
-
         if pipe.transformer.config.sample_size == 256:
-            aspect_ratio_bin = ASPECT_RATIO_2048_BIN
+            aspect_ratio_bin = pipeline.ASPECT_RATIO_2048_BIN
         elif pipe.transformer.config.sample_size == 128:
-            aspect_ratio_bin = ASPECT_RATIO_1024_BIN
+            aspect_ratio_bin = pipeline.ASPECT_RATIO_1024_BIN
         elif pipe.transformer.config.sample_size == 64:
-            aspect_ratio_bin = ASPECT_RATIO_512_BIN
+            aspect_ratio_bin = pipeline.ASPECT_RATIO_512_BIN
         elif pipe.transformer.config.sample_size == 32:
-            aspect_ratio_bin = ASPECT_RATIO_256_BIN
+            aspect_ratio_bin = pipeline.ASPECT_RATIO_256_BIN
         else:
             raise ValueError("Invalid sample size")
 
@@ -336,9 +347,9 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
     #   always generate the noise here
     generator = [torch.Generator(device='cpu').manual_seed(fixed_seed+i) for i in range(num_images)]
     latents = randn_tensor(shape, generator=generator).to('cuda').to(torch.float16)
-    #regen the generator otherwise results between batch/single will be different
+    #regen the generator to minimise differences between single/batch - might still be different - batch processing could use different pytorch kernels
     del generator
-    generator = torch.Generator(device='cpu').manual_seed(fixed_seed)
+    generator = torch.Generator(device='cpu').manual_seed(14641)
 
     #   colour the initial noise
     if PixArtStorage.noiseRGBA[3] != 0.0:
@@ -432,10 +443,16 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         output = pipe(
             generator                       = generator,
             latents                         = latents,                          #   initial noise, possibly with colour biasing
+
             image                           = i2iSource,
             mask_image                      = maskSource,
             strength                        = i2iDenoise,
             mask_cutoff                     = maskCutOff,
+            control_image                   = controlNetImage,
+            controlnet_conditioning_scale   = controlNetStrength,
+            control_guidance_start          = controlNetStart,
+            control_guidance_end            = controlNetEnd,
+
             num_inference_steps             = num_steps,
             num_images_per_prompt           = num_images,
             height                          = height,
@@ -457,9 +474,9 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 #   but seem to need vae loaded earlier anyway
 
     del pipe.transformer, generator, latents
-    pipe.transformer = None
-    gc.collect()
-    torch.cuda.empty_cache()
+
+#    gc.collect()
+#    torch.cuda.empty_cache()
 
     result = []
     for image in output:
@@ -493,6 +510,12 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 
 
 def on_ui_tabs():
+    from importlib import reload
+    reload(models)
+    reload(pipeline)
+    reload(controlnet)
+    
+    
     models_list = models.models_list_alpha + models.models_list_sigma
     defaultModel = models.defaultModel
     defaultWidth = models.defaultWidth
@@ -612,7 +635,7 @@ def on_ui_tabs():
         if "Prompt" != p[0] and "Prompt: " != p[0][0:8]:               #   civitAI style special case
             positive = p[0]
             l = 1
-            while (l < lineCount) and not (p[l][0:17] == "Negative prompt: " or p[l][0:7] == "Steps: "):
+            while (l < lineCount) and not (p[l][0:17] == "Negative prompt: " or p[l][0:7] == "Steps: " or p[l][0:6] == "Size: "):
                 if p[l] != '':
                     positive += '\n' + p[l]
                 l += 1
@@ -628,7 +651,7 @@ def on_ui_tabs():
                 else:
                     continue
 
-                while (l+c < lineCount) and not (p[l+c][0:10] == "Negative: " or p[l+c][0:15] == "Negative Prompt" or p[l+c] == "Params" or p[l+c][0:7] == "Steps: "):
+                while (l+c < lineCount) and not (p[l+c][0:10] == "Negative: " or p[l+c][0:15] == "Negative Prompt" or p[l+c] == "Params" or p[l+c][0:7] == "Steps: " or p[l+c][0:6] == "Size: "):
                     if p[l+c] != '':
                         positive += '\n' + p[l+c]
                     c += 1
@@ -647,7 +670,7 @@ def on_ui_tabs():
                 else:
                     continue
                 
-                while (l+c < lineCount) and not (p[l+c] == "Params" or p[l+c][0:7] == "Steps: "):
+                while (l+c < lineCount) and not (p[l+c] == "Params" or p[l+c][0:7] == "Steps: " or p[l+c][0:6] == "Size: "):
                     if p[l+c] != '':
                         negative += '\n' + p[l+c]
                     c += 1
@@ -727,6 +750,18 @@ def on_ui_tabs():
         wh = dims.split('\u00D7')
         return None, int(wh[0]), int(wh[1])
 
+    def processCN (image, method):
+        if image:
+            if method == 1:     # generate HED edge
+                try:
+                    from controlnet_aux import HEDdetector
+                    hed = HEDdetector.from_pretrained("lllyasviel/Annotators")
+                    hed_edge = hed(image)
+                    return hed_edge
+                except:
+                    print ("Need controlAux package to preprocess.")
+                    return image
+        return image
 
     with gr.Blocks() as pixartsigma2_block:
         with ResizeHandleRow():
@@ -774,6 +809,16 @@ def on_ui_tabs():
                         initialNoiseB = gr.Slider(minimum=0, maximum=1.0, value=0.0, step=0.01,  label='blue')
                         initialNoiseA = gr.Slider(minimum=0, maximum=0.3, value=0.0, step=0.005, label='strength')
 
+                with gr.Accordion(label='ControlNet (α only)', open=False):
+                    with gr.Row():
+                        CNSource = gr.Image(label='control image', sources=['upload'], type='pil', interactive=True, show_download_button=False)
+                        with gr.Column():
+                            CNMethod = gr.Dropdown(['(None)', 'HED edge'], label='method', value='(None)', type='index', multiselect=False, scale=1)
+#                            CNProcess = gr.Button(value='Preprocess input image')
+                            CNStrength = gr.Slider(label='Strength', minimum=0.00, maximum=1.0, step=0.01, value=0.8)
+                            CNStart = gr.Slider(label='Start step', minimum=0.00, maximum=1.0, step=0.01, value=0.0)
+                            CNEnd = gr.Slider(label='End step', minimum=0.00, maximum=1.0, step=0.01, value=0.8)
+
                 with gr.Accordion(label='image to image', open=False):
                     with gr.Row():
                         i2iSource = gr.Image(label='image to image source', sources=['upload'], type='pil', interactive=True, show_download_button=False)
@@ -783,18 +828,18 @@ def on_ui_tabs():
                             i2iSetWH = gr.Button(value='Set Width / Height from image')
                             i2iFromGallery = gr.Button(value='Get image from gallery')
                             with gr.Row():
-                                i2iCaption = gr.Button(value='Caption this image (Florence-2)', scale=9)
+                                i2iCaption = gr.Button(value='Caption this image (Florence-2)', scale=7)
                                 toPrompt = ToolButton(value='P', variant='secondary')
                             maskCut = gr.Slider(label='Ignore Mask after step', minimum=0.00, maximum=1.0, step=0.01, value=1.0)
 
-                ctrls = [positive_prompt, negative_prompt, model, vae, width, height, guidance_scale, guidance_rescale, guidance_cutoff, steps, DMDstep, sampling_seed, batch_size, scheduler, i2iSource, i2iDenoise, maskSource, maskCut, style]
+                ctrls = [positive_prompt, negative_prompt, model, vae, width, height, guidance_scale, guidance_rescale, guidance_cutoff, steps, DMDstep, sampling_seed, batch_size, scheduler, i2iSource, i2iDenoise, maskSource, maskCut, style, CNSource, CNMethod, CNStrength, CNStart, CNEnd]
                 
                 parseCtrls = [positive_prompt, negative_prompt, width, height, sampling_seed, scheduler, steps, guidance_scale, guidance_rescale, guidance_cutoff, initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA]
 
             with gr.Column():
                 generate_button = gr.Button(value="Generate", variant='primary', visible=True)
                 output_gallery = gr.Gallery(label='Output', height="80vh",
-                                            show_label=False, object_fit='contain', visible=True, columns=3, preview=True)
+                                            show_label=False, object_fit='contain', visible=True, columns=1, preview=True)
 #   gallery movement buttons don't work, others do
 #   caption not displaying linebreaks, alt text does
 
@@ -840,6 +885,7 @@ def on_ui_tabs():
             show_progress=False
         )
 #        vpred.click(toggleVP, inputs=[], outputs=vpred)
+#        CNProcess.click(processCN, inputs=[CNSource, CNMethod], outputs=[CNSource])
         dims.input(updateWH, inputs=[dims, width, height], outputs=[dims, width, height], show_progress=False)
         parse.click(parsePrompt, inputs=parseCtrls, outputs=parseCtrls, show_progress=False)
         access.click(toggleAccess, inputs=[], outputs=access)

@@ -1,22 +1,38 @@
-import math
-import torch
-import gc
-import json
-import numpy as np
-import os
+####    THIS IS main BRANCH, unloads models after use
 
+import gc
+import gradio
+import math
+import numpy
+import os
+import torch
+import torchvision.transforms.functional as TF
+
+##   from webui
 from modules import script_callbacks, images, shared
 from modules.processing import get_fixed_seed
 from modules.shared import opts
 from modules.ui_components import ResizeHandleRow, ToolButton
 import modules.infotext_utils as parameters_copypaste
-import gradio as gr
 
-#workaround for unnecessary flash_attn requirement for Florence-2
+##   diffusers / transformers necessary imports
+from transformers import T5EncoderModel, T5Tokenizer, T5TokenizerFast, T5ForConditionalGeneration
+
+from diffusers import PixArtTransformer2DModel
+from diffusers import AutoencoderKL
+from diffusers import ConsistencyDecoderVAE
+from diffusers import DEISMultistepScheduler, DPMSolverSinglestepScheduler, DPMSolverMultistepScheduler, DPMSolverSDEScheduler
+from diffusers import EulerAncestralDiscreteScheduler, EulerDiscreteScheduler, UniPCMultistepScheduler, DDPMScheduler
+from diffusers import SASolverScheduler, LCMScheduler
+from peft import PeftModel
+from diffusers.utils.torch_utils import randn_tensor
+
+##  for Florence-2, including workaround for unnecessary flash_attn requirement
 from unittest.mock import patch
 from transformers.dynamic_module_utils import get_imports
 from transformers import AutoProcessor, AutoModelForCausalLM 
 
+##   my extras
 import customStylesListPA as styles
 import modelsListPA as models
 import scripts.PixArt_pipeline as pipeline
@@ -38,29 +54,9 @@ class PixArtStorage:
     karras = False
     vpred = False
     resolutionBin = True
+    sharpNoise = False
 
-
-from transformers import T5EncoderModel, T5Tokenizer
-#from scripts.PixArt_pipeline import PixArtPipeline_DoE_combined
-
-from diffusers import PixArtTransformer2DModel
-from diffusers import AutoencoderKL
-from diffusers import ConsistencyDecoderVAE
-from diffusers import DEISMultistepScheduler, DPMSolverSinglestepScheduler, DPMSolverMultistepScheduler, DPMSolverSDEScheduler
-from diffusers import EulerAncestralDiscreteScheduler, EulerDiscreteScheduler, UniPCMultistepScheduler, DDPMScheduler
-from diffusers import SASolverScheduler, LCMScheduler
-from peft import PeftModel
-
-from diffusers.utils.torch_utils import randn_tensor
-
-# modules/infotext_utils.py
-def quote(text):
-    if ',' not in str(text) and '\n' not in str(text) and ':' not in str(text):
-        return text
-
-    return json.dumps(text, ensure_ascii=False)
-
-# modules/processing.py
+# modules/processing.py - don't use ',', '\n', ':' in values
 def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, guidance_rescale, guidance_cutoff, steps, DMDstep, seed, scheduler, width, height):
     karras = " : Karras" if PixArtStorage.karras == True else ""
     vpred = " : V-Prediction" if PixArtStorage.vpred == True else ""
@@ -69,16 +65,15 @@ def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, gui
         "Size": f"{width}x{height}",
         "Seed": seed,
         "Scheduler": f"{scheduler}{karras}{vpred}",
+        "DMDstep": DMDstep if isDMD else None,
         "Steps": steps if not isDMD else None,
         "CFG": f"{guidance_scale} ({guidance_rescale}) [{guidance_cutoff}]",
-        "DMDstep": DMDstep if isDMD else None,
-        "RNG": opts.randn_source if opts.randn_source != "GPU" else None
     }
 #add i2i marker?
     prompt_text = f"Prompt: {positive_prompt}\n"
     if negative_prompt != "":
         prompt_text += (f"Negative: {negative_prompt}\n")
-    generation_params_text = ", ".join([k if k == v else f'{k}: {quote(v)}' for k, v in generation_params.items() if v is not None])
+    generation_params_text = ", ".join([k if k == v else f'{k}: {v}' for k, v in generation_params.items() if v is not None])
     noise_text = f"\nInitial noise: {PixArtStorage.noiseRGBA}" if PixArtStorage.noiseRGBA[3] != 0.0 else ""
 
     return f"Model: {model}\n{prompt_text}{generation_params_text}{noise_text}"
@@ -105,6 +100,8 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         isSigma = False
     if model in models.models_list_sigma:
         isSigma = True
+
+    is2Stage = isSigma and model[-7:] == '-stage1'
 
     useConsistencyVAE = (isSigma == 0) and (vae == 1)
 
@@ -174,6 +171,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
                 subfolder="text_encoder",
                 use_safetensors=True,
                 torch_dtype=torch.float16, )
+##  should I fetch from a different repo? - would be direct fp16 download
 
             ##  now save the converted fp16 T5 model to local cache, only needs done once
             text_encoder.to(torch.float16)
@@ -205,7 +203,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         text_encoder=text_encoder,
         transformer=None,
         vae=None,
-        controlnet=None,
+#        controlnet=None,
         torch_dtype=torch.float16, )
     del tokenizer, text_encoder
 
@@ -232,7 +230,6 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
     gc.collect()
     torch.cuda.empty_cache()
 
-    pipe.to('cuda')
 ####    load transformer, same process for Alpha and Sigma
     base = "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS" if isSigma else "PixArt-alpha/PixArt-XL-2-1024-MS"
     if isFlash: #   base is an attempt at future proofing - base flash pipeline is currently always Alpha
@@ -246,33 +243,54 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
             pipe.transformer,
             "jasperai/flash-pixart"
         )
+#    elif isCustom:
+#        custom = ".//models//diffusers//PixArtCustom//" + model
+#        pipe.transformer = Transformer2DModel.from_single_file(
+#            custom,
+#            local_files_only=False, cache_dir=".//models//diffusers//",
+#            use_safetensors=True,
+#            torch_dtype=torch.float16,
+#            subfolder="transformer",
+#            config=base
+#        )
     else:
         try:
             pipe.transformer = PixArtTransformer2DModel.from_pretrained(
                 model,
                 local_files_only=False, cache_dir=".//models//diffusers//",
                 subfolder='transformer',
+                low_cpu_mem_usage=True, 
                 torch_dtype=torch.float16,
-#                low_cpu_mem_usage=False,
-#                device_map=None, 
                 token=access_token,
             )
-#            config=base)
         except:
             print ("PixArt: failed to load transformer. Repository may be gated and require a huggingface access token. See 'README.md'.")
             PixArtStorage.locked = False
-            return gr.Button.update(value='Generate', variant='primary', interactive=True), None
+            return gradio.Button.update(value='Generate', variant='primary', interactive=True), None
+
+    if is2Stage:
+        refinerModel = model[:-1] + '2'
+        pipe.refiner = PixArtTransformer2DModel.from_pretrained(
+            refinerModel,
+            local_files_only=False, cache_dir=".//models//diffusers//",
+            subfolder='transformer',
+            low_cpu_mem_usage=True, 
+            torch_dtype=torch.float16,
+            token=access_token,
+        )
 
 ##    # LoRA model -can't find examples in necessary form
-    # loraLocation = ".//models//diffusers//PixArtLora//Wednesday.safetensors"
-    # loraName = "Wednesday.safetensors"
-    # pipe.transformer = PeftModel.from_pretrained(
-        # pipe.transformer,
-        # loraLocation,
-        # adapter_name=loraName,
-        # config=None,
-        # local_files_only=True
-    # )
+#    loraLocation = ".//models//diffusers//PixArtLora//Wednesday.safetensors"
+#    loraName = "Wednesday"
+#    pipe.load_lora_weights (loraLocation, adapter_name="a1")
+
+#    pipe.transformer = PeftModel.from_pretrained(
+#        pipe.transformer,
+#        loraLocation,
+#        adapter_name=loraName,
+#        config=None,
+#        local_files_only=True
+#    )
 
 ####    VAEs are same for Alpha, and for Sigma. Sigma already shared, now Alpha is too.
 
@@ -347,6 +365,14 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
     #   always generate the noise here
     generator = [torch.Generator(device='cpu').manual_seed(fixed_seed+i) for i in range(num_images)]
     latents = randn_tensor(shape, generator=generator).to('cuda').to(torch.float16)
+    
+    if PixArtStorage.sharpNoise:
+        minDim = 1 + 2*(min(latents.size(2), latents.size(3)) // 4)
+        for b in range(len(latents)):
+            blurred = TF.gaussian_blur(latents[b], minDim)
+            latents[b] = 1.05*latents[b] - 0.05*blurred
+    
+    
     #regen the generator to minimise differences between single/batch - might still be different - batch processing could use different pytorch kernels
     del generator
     generator = torch.Generator(device='cpu').manual_seed(14641)
@@ -357,9 +383,9 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         ng = PixArtStorage.noiseRGBA[1] ** 0.5
         nb = PixArtStorage.noiseRGBA[2] ** 0.5
 
-        imageR = torch.tensor(np.full((8,8), (nr), dtype=np.float32))
-        imageG = torch.tensor(np.full((8,8), (ng), dtype=np.float32))
-        imageB = torch.tensor(np.full((8,8), (nb), dtype=np.float32))
+        imageR = torch.tensor(numpy.full((8,8), (nr), dtype=numpy.float32))
+        imageG = torch.tensor(numpy.full((8,8), (ng), dtype=numpy.float32))
+        imageB = torch.tensor(numpy.full((8,8), (nb), dtype=numpy.float32))
         image = torch.stack((imageR, imageG, imageB), dim=0).unsqueeze(0)
 
         image = pipe.image_processor.preprocess(image).to('cuda').to(torch.float16)
@@ -396,14 +422,14 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 
     if isDMD or isLCM:
         scheduler = 'default'
-    elif isFlash:
+
+    if isFlash:
         # Scheduler
         pipe.scheduler = LCMScheduler.from_pretrained(
             "PixArt-alpha/PixArt-XL-2-1024-MS",
             subfolder="scheduler",
             timestep_spacing="trailing",
         )
-        scheduler = 'LCM'
     elif scheduler == 'DDPM':
         pipe.scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
     elif scheduler == 'DEIS':
@@ -433,8 +459,8 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
     if hasattr(pipe.scheduler.config, 'use_karras_sigmas'):
         pipe.scheduler.config.use_karras_sigmas = PixArtStorage.karras
         
-    if PixArtStorage.vpred == True:
-        pipe.scheduler.config.prediction_type = 'v_prediction'
+#    if PixArtStorage.vpred == True:
+#        pipe.scheduler.config.prediction_type = 'v_prediction'
 
     pipe.transformer.to(memory_format=torch.channels_last)
     pipe.vae.to(memory_format=torch.channels_last)
@@ -473,7 +499,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 #   vae uses lots of VRAM, especially with batches, maybe worth output to latent, free memory
 #   but seem to need vae loaded earlier anyway
 
-    del pipe.transformer, generator, latents
+    del pipe, generator, latents
 
 #    gc.collect()
 #    torch.cuda.empty_cache()
@@ -501,21 +527,29 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         )
         fixed_seed += 1
 
-    del output, pipe
+    del output
     gc.collect()
     torch.cuda.empty_cache()
 
     PixArtStorage.locked = False
-    return gr.Button.update(value='Generate', variant='primary', interactive=True), result
+    return gradio.Button.update(value='Generate', variant='primary', interactive=True), result
 
 
 def on_ui_tabs():
+    try:    # check for Forge, this module reload doesn't work in A1111
+        _ = import_module("modules_forge.config")
+        import reload
+        reload (models)
+        reload (pipeline)
+    except:
+        pass
+    
     models_list = models.models_list_alpha + models.models_list_sigma
     defaultModel = models.defaultModel
     defaultWidth = models.defaultWidth
     defaultHeight = models.defaultHeight
     
-    def getGalleryIndex (evt: gr.SelectData):
+    def getGalleryIndex (evt: gradio.SelectData):
         PixArtStorage.galleryIndex = evt.index
 
     def reuseLastSeed ():
@@ -590,32 +624,67 @@ def on_ui_tabs():
             return None
     def toggleC2P ():
         PixArtStorage.captionToPrompt ^= True
-        return gr.Button.update(variant=['secondary', 'primary'][PixArtStorage.captionToPrompt])
+        return gradio.Button.update(variant=['secondary', 'primary'][PixArtStorage.captionToPrompt])
     def toggleAccess ():
         PixArtStorage.sendAccessToken ^= True
-        return gr.Button.update(variant=['secondary', 'primary'][PixArtStorage.sendAccessToken])
+        return gradio.Button.update(variant=['secondary', 'primary'][PixArtStorage.sendAccessToken])
 
     #   these are volatile state, should not be changed during generation
     def toggleKarras ():
         if not PixArtStorage.locked:
             PixArtStorage.karras ^= True
-        return gr.Button.update(variant='primary' if PixArtStorage.karras == True else 'secondary',
+        return gradio.Button.update(variant='primary' if PixArtStorage.karras == True else 'secondary',
                                 value='\U0001D40A' if PixArtStorage.karras == True else '\U0001D542')
     def toggleResBin ():
         if not PixArtStorage.locked:
             PixArtStorage.resolutionBin ^= True
-        return gr.Button.update(variant='primary' if PixArtStorage.resolutionBin == True else 'secondary',
+        return gradio.Button.update(variant='primary' if PixArtStorage.resolutionBin == True else 'secondary',
                                 value='\U0001D401' if PixArtStorage.resolutionBin == True else '\U0001D539')
 #    def toggleVP ():
 #        if not PixArtStorage.locked:
 #           PixArtStorage.vpred ^= True
-#        return gr.Button.update(variant='primary' if PixArtStorage.vpred == True else 'secondary',
+#        return gradio.Button.update(variant='primary' if PixArtStorage.vpred == True else 'secondary',
 #                                value='\U0001D415' if PixArtStorage.vpred == True else '\U0001D54D')
+    def toggleSP ():
+        if not PixArtStorage.locked:
+            return gradio.Button.update(variant='primary')
+    def superPrompt (prompt, seed):
+        tokenizer = getattr (shared, 'SuperPrompt_tokenizer', None)
+        superprompt = getattr (shared, 'SuperPrompt_model', None)
+        if tokenizer is None:
+            tokenizer = T5TokenizerFast.from_pretrained(
+                'roborovski/superprompt-v1',
+                cache_dir='.//models//diffusers//',
+            )
+            shared.SuperPrompttokenizer = tokenizer
+        if superprompt is None:
+            superprompt = T5ForConditionalGeneration.from_pretrained(
+                'roborovski/superprompt-v1',
+                cache_dir='.//models//diffusers//',
+                device_map='auto',
+                torch_dtype=torch.float16
+            )
+            shared.SuperPrompt_model = superprompt
+            print("SuperPrompt-v1 model loaded successfully.")
+            if torch.cuda.is_available():
+                superprompt.to('cuda')
+
+        torch.manual_seed(get_fixed_seed(seed))
+        device = superprompt.device
+        systemprompt1 = "Expand the following prompt to add more detail: "
+        
+        input_ids = tokenizer(systemprompt1 + prompt, return_tensors="pt").input_ids.to(device)
+        outputs = superprompt.generate(input_ids, max_new_tokens=256, repetition_penalty=1.2, do_sample=True)
+        dirty_text = tokenizer.decode(outputs[0])
+        result = dirty_text.replace("<pad>", "").replace("</s>", "").strip()
+        
+        return gradio.Button.update(variant='secondary'), result
+
 
     def toggleGenerate (R, G, B, A):
         PixArtStorage.noiseRGBA = [R, G, B, A]
         PixArtStorage.locked = True
-        return gr.Button.update(value='...', variant='secondary', interactive=False)
+        return gradio.Button.update(value='...', variant='secondary', interactive=False)
 
     schedulerList = ["default", "DDPM", "DEIS", "DPM++ 2M", "DPM++ 2M SDE", "DPM", "DPM SDE",
                      "Euler", "Euler A", "LCM", "SA-solver", "UniPC", ]
@@ -756,88 +825,96 @@ def on_ui_tabs():
                     print ("Need controlAux package to preprocess.")
                     return image
         return image
+    def toggleSharp ():
+        if not PixArtStorage.locked:
+            PixArtStorage.sharpNoise ^= True
+        return gradio.Button.update(value=['s', 'S'][PixArtStorage.sharpNoise],
+                                variant=['secondary', 'primary'][PixArtStorage.sharpNoise])
 
-    with gr.Blocks() as pixartsigma2_block:
+    with gradio.Blocks() as pixartsigma2_block:
         with ResizeHandleRow():
-            with gr.Column():
-                with gr.Row():
-                    model = gr.Dropdown(models_list, label='Model', value=defaultModel, type='value', scale=2)
+            with gradio.Column():
+                with gradio.Row():
+                    model = gradio.Dropdown(models_list, label='Model', value=defaultModel, type='value', scale=2)
                     access = ToolButton(value='\U0001F917', variant='secondary')
-                    vae = gr.Dropdown(["default", "consistency"], label='VAE', value='default', type='index', scale=1)
-                    scheduler = gr.Dropdown(schedulerList,
+                    vae = gradio.Dropdown(["default", "consistency"], label='VAE', value='default', type='index', scale=1)
+                    scheduler = gradio.Dropdown(schedulerList,
                         label='Sampler', value="UniPC", type='value', scale=1)
                     karras = ToolButton(value="\U0001D542", variant='secondary', tooltip="use Karras sigmas")
 #                    vpred = ToolButton(value="\U0001D54D", variant='secondary', tooltip="use v-prediction")
 
-                with gr.Row():
-                    positive_prompt = gr.Textbox(label='Prompt', placeholder='Enter a prompt here...', default='', lines=2)
+                with gradio.Row():
+                    positive_prompt = gradio.Textbox(label='Prompt', placeholder='Enter a prompt here...', default='', lines=2)
                     parse = ToolButton(value="↙️", variant='secondary', tooltip="parse")
+                    SP = ToolButton(value='ꌗ', variant='secondary', tooltip='zero out negative embeds')
 
-                with gr.Row():
-                    negative_prompt = gr.Textbox(label='Negative', placeholder='', lines=2)
-                    style = gr.Dropdown([x[0] for x in styles.styles_list], label='Style', value="(None)", type='index', scale=0)
-                with gr.Row():
-                    width = gr.Slider(label='Width', minimum=128, maximum=4096, step=16, value=defaultWidth, elem_id="PixArtSigma_width")
+                with gradio.Row():
+                    negative_prompt = gradio.Textbox(label='Negative', placeholder='', lines=2)
+                    style = gradio.Dropdown([x[0] for x in styles.styles_list], label='Style', value="(None)", type='index', scale=0)
+                with gradio.Row():
+                    width = gradio.Slider(label='Width', minimum=128, maximum=4096, step=16, value=defaultWidth, elem_id="PixArtSigma_width")
                     swapper = ToolButton(value="\U000021C4")
-                    height = gr.Slider(label='Height', minimum=128, maximum=4096, step=16, value=defaultHeight, elem_id="PixArtSigma_height")
+                    height = gradio.Slider(label='Height', minimum=128, maximum=4096, step=16, value=defaultHeight, elem_id="PixArtSigma_height")
                     resBin = ToolButton(value="\U0001D401", variant='primary', tooltip="use resolution binning")
-                    dims = gr.Dropdown([f'{i} \u00D7 {j}' for i,j in resolutionList1024],
+                    dims = gradio.Dropdown([f'{i} \u00D7 {j}' for i,j in resolutionList1024],
                                         label='Quickset', type='value', scale=0)
 
-                with gr.Row():
-                    guidance_scale = gr.Slider(label='CFG', minimum=1, maximum=8, step=0.1, value=4.0, scale=1, visible=True)
-                    guidance_rescale = gr.Slider(label='rescale CFG', minimum=0.00, maximum=1.0, step=0.01, value=0.0, precision=0.01, scale=1)
-                    guidance_cutoff = gr.Slider(label='CFG cutoff after step', minimum=0.00, maximum=1.0, step=0.01, value=1.0, precision=0.01, scale=1)
-                    DMDstep = gr.Slider(label='Timestep for DMD', minimum=1, maximum=999, step=1, value=400, scale=2, visible=False)
-                with gr.Row():
-                    steps = gr.Slider(label='Steps', minimum=1, maximum=60, step=1, value=20, scale=2, visible=True)
-                    sampling_seed = gr.Number(label='Seed', value=-1, precision=0, scale=1)
+                with gradio.Row():
+                    guidance_scale = gradio.Slider(label='CFG', minimum=1, maximum=8, step=0.1, value=4.0, scale=1, visible=True)
+#   add CFG for refiner?
+                    guidance_rescale = gradio.Slider(label='rescale CFG', minimum=0.00, maximum=1.0, step=0.01, value=0.0, precision=0.01, scale=1)
+                    guidance_cutoff = gradio.Slider(label='CFG cutoff after step', minimum=0.00, maximum=1.0, step=0.01, value=1.0, precision=0.01, scale=1)
+                    DMDstep = gradio.Slider(label='Timestep for DMD', minimum=1, maximum=999, step=1, value=400, scale=2, visible=False)
+                with gradio.Row():
+                    steps = gradio.Slider(label='Steps', minimum=1, maximum=60, step=1, value=20, scale=2, visible=True)
+                    sampling_seed = gradio.Number(label='Seed', value=-1, precision=0, scale=1)
                     random = ToolButton(value="\U0001f3b2\ufe0f")
                     reuseSeed = ToolButton(value="\u267b\ufe0f")
-                    batch_size = gr.Number(label='Batch Size', minimum=1, maximum=9, value=1, precision=0, scale=0)
+                    batch_size = gradio.Number(label='Batch Size', minimum=1, maximum=9, value=1, precision=0, scale=0)
 
-                with gr.Accordion(label='the colour of noise', open=False):
-                    with gr.Row():
-                        initialNoiseR = gr.Slider(minimum=0, maximum=1.0, value=0.0, step=0.01,  label='red')
-                        initialNoiseG = gr.Slider(minimum=0, maximum=1.0, value=0.0, step=0.01,  label='green')
-                        initialNoiseB = gr.Slider(minimum=0, maximum=1.0, value=0.0, step=0.01,  label='blue')
-                        initialNoiseA = gr.Slider(minimum=0, maximum=0.3, value=0.0, step=0.005, label='strength')
+                with gradio.Accordion(label='the colour of noise', open=False):
+                    with gradio.Row():
+                        initialNoiseR = gradio.Slider(minimum=0, maximum=1.0, value=0.0, step=0.01,  label='red')
+                        initialNoiseG = gradio.Slider(minimum=0, maximum=1.0, value=0.0, step=0.01,  label='green')
+                        initialNoiseB = gradio.Slider(minimum=0, maximum=1.0, value=0.0, step=0.01,  label='blue')
+                        initialNoiseA = gradio.Slider(minimum=0, maximum=0.3, value=0.0, step=0.005, label='strength')
+                        sharpNoise = ToolButton(value="s", variant='secondary', tooltip='Sharpen initial noise')
 
-                with gr.Accordion(label='ControlNet (α only)', open=False):
-                    with gr.Row():
-                        CNSource = gr.Image(label='control image', sources=['upload'], type='pil', interactive=True, show_download_button=False)
-                        with gr.Column():
-                            CNMethod = gr.Dropdown(['(None)', 'HED edge'], label='method', value='(None)', type='index', multiselect=False, scale=1)
-#                            CNProcess = gr.Button(value='Preprocess input image')
-                            CNStrength = gr.Slider(label='Strength', minimum=0.00, maximum=1.0, step=0.01, value=0.8)
-                            CNStart = gr.Slider(label='Start step', minimum=0.00, maximum=1.0, step=0.01, value=0.0)
-                            CNEnd = gr.Slider(label='End step', minimum=0.00, maximum=1.0, step=0.01, value=0.8)
+                with gradio.Accordion(label='ControlNet (α only)', open=False):
+                    with gradio.Row():
+                        CNSource = gradio.Image(label='control image', sources=['upload'], type='pil', interactive=True, show_download_button=False)
+                        with gradio.Column():
+                            CNMethod = gradio.Dropdown(['(None)', 'HED edge'], label='method', value='(None)', type='index', multiselect=False, scale=1)
+#                            CNProcess = gradio.Button(value='Preprocess input image')
+                            CNStrength = gradio.Slider(label='Strength', minimum=0.00, maximum=1.0, step=0.01, value=0.8)
+                            CNStart = gradio.Slider(label='Start step', minimum=0.00, maximum=1.0, step=0.01, value=0.0)
+                            CNEnd = gradio.Slider(label='End step', minimum=0.00, maximum=1.0, step=0.01, value=0.8)
 
-                with gr.Accordion(label='image to image', open=False):
-                    with gr.Row():
-                        i2iSource = gr.Image(label='image to image source', sources=['upload'], type='pil', interactive=True, show_download_button=False)
-                        maskSource = gr.Image(label='source mask', sources=['upload'], type='pil', interactive=True, show_download_button=False)
-                        with gr.Column():
-                            i2iDenoise = gr.Slider(label='Denoise', minimum=0.00, maximum=1.0, step=0.01, value=0.5)
-                            i2iSetWH = gr.Button(value='Set Width / Height from image')
-                            i2iFromGallery = gr.Button(value='Get image from gallery')
-                            with gr.Row():
-                                i2iCaption = gr.Button(value='Caption this image (Florence-2)', scale=7)
+                with gradio.Accordion(label='image to image', open=False):
+                    with gradio.Row():
+                        i2iSource = gradio.Image(label='image to image source', sources=['upload'], type='pil', interactive=True, show_download_button=False)
+                        maskSource = gradio.Image(label='source mask', sources=['upload'], type='pil', interactive=True, show_download_button=False)
+                        with gradio.Column():
+                            i2iDenoise = gradio.Slider(label='Denoise', minimum=0.00, maximum=1.0, step=0.01, value=0.5)
+                            i2iSetWH = gradio.Button(value='Set Width / Height from image')
+                            i2iFromGallery = gradio.Button(value='Get image from gallery')
+                            with gradio.Row():
+                                i2iCaption = gradio.Button(value='Caption this image (Florence-2)', scale=7)
                                 toPrompt = ToolButton(value='P', variant='secondary')
-                            maskCut = gr.Slider(label='Ignore Mask after step', minimum=0.00, maximum=1.0, step=0.01, value=1.0)
+                            maskCut = gradio.Slider(label='Ignore Mask after step', minimum=0.00, maximum=1.0, step=0.01, value=1.0)
 
                 ctrls = [positive_prompt, negative_prompt, model, vae, width, height, guidance_scale, guidance_rescale, guidance_cutoff, steps, DMDstep, sampling_seed, batch_size, scheduler, i2iSource, i2iDenoise, maskSource, maskCut, style, CNSource, CNMethod, CNStrength, CNStart, CNEnd]
                 
                 parseCtrls = [positive_prompt, negative_prompt, width, height, sampling_seed, scheduler, steps, guidance_scale, guidance_rescale, guidance_cutoff, initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA]
 
-            with gr.Column():
-                generate_button = gr.Button(value="Generate", variant='primary', visible=True)
-                output_gallery = gr.Gallery(label='Output', height="80vh",
+            with gradio.Column():
+                generate_button = gradio.Button(value="Generate", variant='primary', visible=True)
+                output_gallery = gradio.Gallery(label='Output', height="80vh",
                                             show_label=False, object_fit='contain', visible=True, columns=1, preview=True)
 #   gallery movement buttons don't work, others do
 #   caption not displaying linebreaks, alt text does
 
-                with gr.Row():
+                with gradio.Row():
                     buttons = parameters_copypaste.create_buttons(["img2img", "inpaint", "extras"])
 
                 for tabname, button in buttons.items():
@@ -850,9 +927,9 @@ def on_ui_tabs():
 
         def show_steps(model):
             if "PixArt-Alpha-DMD" in model:
-                return gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(interactive=False), gr.update(visible=True)
+                return gradio.update(visible=False), gradio.update(visible=False), gradio.update(visible=False), gradio.update(interactive=False), gradio.update(visible=True)
             else:
-                return gr.update(visible=True),  gr.update(visible=True),  gr.update(visible=True),  gr.update(interactive=True),  gr.update(visible=False)
+                return gradio.update(visible=True),  gradio.update(visible=True),  gradio.update(visible=True),  gradio.update(interactive=True),  gradio.update(visible=False)
         def set_dims(model):
             if "256" in model:
                 resList = resolutionList256
@@ -864,7 +941,7 @@ def on_ui_tabs():
                 resList = resolutionList1024
 
             choices = [f'{i} \u00D7 {j}' for i,j in resList]
-            return gr.update(choices=choices)
+            return gradio.update(choices=choices)
 
         model.change(
             fn=show_steps,
@@ -880,6 +957,10 @@ def on_ui_tabs():
         )
 #        vpred.click(toggleVP, inputs=[], outputs=vpred)
 #        CNProcess.click(processCN, inputs=[CNSource, CNMethod], outputs=[CNSource])
+        SP.click(toggleSP, inputs=[], outputs=SP)
+        SP.click(superPrompt, inputs=[positive_prompt, sampling_seed], outputs=[SP, positive_prompt])
+
+        sharpNoise.click(toggleSharp, inputs=[], outputs=sharpNoise)
         dims.input(updateWH, inputs=[dims, width, height], outputs=[dims, width, height], show_progress=False)
         parse.click(parsePrompt, inputs=parseCtrls, outputs=parseCtrls, show_progress=False)
         access.click(toggleAccess, inputs=[], outputs=access)

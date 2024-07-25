@@ -1,3 +1,5 @@
+####    THIS IS main BRANCH, unloads models after use
+
 # Copyright 2024 PixArt-Alpha Authors and The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -236,7 +238,9 @@ def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
     noise_cfg = guidance_rescale * noise_pred_rescaled + (1 - guidance_rescale) * noise_cfg
     return noise_cfg
 
-class PixArtPipeline_DoE_combined(DiffusionPipeline):#maybe PAGMixin
+from diffusers.loaders import FromSingleFileMixin, SD3LoraLoaderMixin
+
+class PixArtPipeline_DoE_combined(DiffusionPipeline, SD3LoraLoaderMixin):#maybe PAGMixin
 
     bad_punct_regex = re.compile(
         r"["
@@ -255,7 +259,7 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):#maybe PAGMixin
     )  # noqa
 
     _optional_components = ["tokenizer", "text_encoder"]
-    model_cpu_offload_seq = "text_encoder->transformer->vae"
+    model_cpu_offload_seq = "text_encoder->transformer->refiner->controlnet->vae"
 
     def __init__(
         self,
@@ -264,12 +268,13 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):#maybe PAGMixin
         vae: AutoencoderKL,
         transformer: PixArtTransformer2DModel,
         scheduler: DPMSolverMultistepScheduler,
-        controlnet: PixArtControlNetAdapterModel,        
+        refiner: Optional[PixArtTransformer2DModel] = None,
+        controlnet: Optional[PixArtControlNetAdapterModel] = None,
     ):
         super().__init__()
         
         self.register_modules(
-            tokenizer=tokenizer, text_encoder=text_encoder, vae=vae, transformer=transformer, scheduler=scheduler, controlnet=controlnet
+            tokenizer=tokenizer, text_encoder=text_encoder, vae=vae, transformer=transformer, scheduler=scheduler, controlnet=controlnet, refiner=refiner
         )
 
         self.vae_scale_factor = (
@@ -316,7 +321,7 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):#maybe PAGMixin
 
         prompt_attention_mask = text_inputs.attention_mask
 
-        prompt_embeds = self.text_encoder(text_input_ids.to(device), attention_mask=prompt_attention_mask)
+        prompt_embeds = self.text_encoder(text_input_ids.to(device), attention_mask=prompt_attention_mask.to(device))
         prompt_embeds = prompt_embeds[0]
 
         # negative - unconditional embeddings for classifier free guidance
@@ -334,8 +339,7 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):#maybe PAGMixin
         negative_prompt_attention_mask = uncond_input.attention_mask
 
         negative_prompt_embeds = self.text_encoder(
-            uncond_input.input_ids.to(device), attention_mask=negative_prompt_attention_mask
-        )
+            uncond_input.input_ids.to(device), attention_mask=negative_prompt_attention_mask.to(device))
         negative_prompt_embeds = negative_prompt_embeds[0]
 
         return prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask
@@ -559,7 +563,6 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):#maybe PAGMixin
         prompt_attention_mask = prompt_attention_mask.repeat(num_images_per_prompt, 1)
         negative_prompt_attention_mask = negative_prompt_attention_mask.repeat(num_images_per_prompt, 1)
 
-
         # 1. Check inputs. Raise error if not correct
         height = height or self.transformer.config.sample_size * self.vae_scale_factor
         width = width or self.transformer.config.sample_size * self.vae_scale_factor
@@ -703,7 +706,13 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):#maybe PAGMixin
                     control_cond = None
                 else:
                     control_cond = control_latents
-                
+
+                if self.refiner != None and t <= 400:
+                    del self.transformer
+                    self.transformer = self.refiner.to('cuda')
+                    del self.refiner
+                    self.refiner = None
+
                 if control_cond is not None:
                     noise_pred = self.transformer(
                         latent_model_input,
@@ -752,6 +761,10 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):#maybe PAGMixin
                     if callback is not None and i % callback_steps == 0:
                         step_idx = i // getattr(self.scheduler, "order", 1)
                         callback(step_idx, t, latents)
+
+        if self.transformer != None:
+            del self.transformer
+            self.transformer = None
 
         if doDiffDiff and 1.0 <= mask_cutoff:
             tmask = (mask >= 1.0)

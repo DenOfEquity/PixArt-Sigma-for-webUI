@@ -8,11 +8,11 @@ I don't think there is anything Forge specific here.
 Go to the **Extensions** tab, then **Install from URL**, use the URL for this repository.
 ### needs updated *diffusers*, *transformers*, *tokenizers*, and *peft* ###
 
-Easiest way to ensure necessary versions are installed is to edit **requirements.txt** or **requirements_versions.txt** in the webUI folder.
+Easiest way to ensure necessary versions are installed is to edit `requirements_versions.txt` in the webUI folder.
 ```
 diffusers>=0.28.1
 tokenizers>=0.19
-transformers==4.40
+transformers>=4.40
 peft
 ```
 These upgrades didn't break anything for me.
@@ -36,7 +36,19 @@ Note that Alpha and Sigma both use the same T5 text encoder, my caching system m
 
 I can generate using all models, though the 2K Sigma model is very slow on my limited hardware. It's undertrained anyway, at present.
 
+>[!NOTE]
+> models are freed after use, reloaded for each run. For me, this is faster overall than keeping them in memory, using a decent but not top-end SSD. But, if you're running from mechanical HD instead this might be terrible.
+
 ---
+<details>
+<summary>Change log</summary>
+
+#### 24/07/2024 ####
+* added SuperPrompt button (ꌗ) to rewrite simple prompts with more detail. This **overwrites** the prompt. Read about SuperPrompt [here](https://brianfitzgerald.xyz/prompt-augmentation). Credit to BrianFitzgerald for the model. (all my alternate model extensions are updated to use this; the model is loaded to a shared location so there's no wasted memory due to duplicates.)
+
+#### 20/07/2024 ####
+* added support for 2-stage model by ptx0. Only Stage-1 is shown in the model dropdown, Stage-2 is downloaded and switched-to automatically.
+
 #### 19/07/2024 ####
 * added controlnet. Currently only HED edge exists, and only for Alpha. Model downloaded automatically (~1.1GB). Initial code pillaged from @raulc0399, added start/stop steps and strength control. Control image must be pre-processed: you can use the controlnet extension in the normal webui txt2img interface. You may need to fully restart the server after installation.
 
@@ -65,7 +77,7 @@ Many changes, hopefully not many bugs too:
 
 #### 30/06/2024 ####
 * added huggingface emoji button to toggle sending of huggingface access token. Some repos may be gated, requiring acceptance of terms before use and an access token. Downloading/updating these models is not possible without these steps, but already downloaded models will continue to work ~~(current example: ptx0/pixart-900m-1024-ft)~~. The official models are not gated.
-	* Sign up / log in, go to your profile, create an access token. Copy it. Make a textfile called ```huggingface_access_token.txt``` in the main webui folder, i.e. ```{forge install directory}\webui```, and paste the token in there. (same instructions as for SD3, only needs done once).
+	* Sign up / log in, go to your profile, create an access token. Copy it. Make a textfile called `huggingface_access_token.txt` in the main webui folder, i.e. `{forge install directory}\webui`, and paste the token in there. (same instructions as for SD3, only needs done once).
 
 #### 25/06/2024 ####
 * added option to caption using Florence-2, in image to image section. 'P' button toggles overwriting prompt, results always written to console.
@@ -120,8 +132,7 @@ avoid error message when Set Width/Height from Image without an image loaded
 * samplers
 * captions in gallery (where linebreaks?)
 * correct seeds for batches
-
-### to do ###
+</details>
 
 
 ---

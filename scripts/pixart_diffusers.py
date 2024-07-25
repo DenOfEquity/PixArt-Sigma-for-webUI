@@ -1,4 +1,6 @@
-####    THIS IS main BRANCH, unloads models after use
+####    THIS IS noUnload BRANCH, keeps models in RAM/VRAM to reduce loading time
+####    with 16GB RAM this is not an improvement if loading from fast SSD
+####    more RAM, slow HD: likely better overall performance
 
 import gc
 import gradio
@@ -17,7 +19,6 @@ import modules.infotext_utils as parameters_copypaste
 
 ##   diffusers / transformers necessary imports
 from transformers import T5EncoderModel, T5Tokenizer, T5TokenizerFast, T5ForConditionalGeneration
-
 from diffusers import PixArtTransformer2DModel
 from diffusers import AutoencoderKL
 from diffusers import ConsistencyDecoderVAE
@@ -26,6 +27,7 @@ from diffusers import EulerAncestralDiscreteScheduler, EulerDiscreteScheduler, U
 from diffusers import SASolverScheduler, LCMScheduler
 from peft import PeftModel
 from diffusers.utils.torch_utils import randn_tensor
+from diffusers.utils import logging
 
 ##  for Florence-2, including workaround for unnecessary flash_attn requirement
 from unittest.mock import patch
@@ -39,6 +41,11 @@ import scripts.PixArt_pipeline as pipeline
 import scripts.controlnet_pixart as controlnet
 
 class PixArtStorage:
+    pipeTE = None
+    pipeTR = None
+    lastTR = None
+    loadedControlNet = None
+
     lastSeed = -1
     galleryIndex = 0
     lastPrompt = None
@@ -89,6 +96,26 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
             print ("PixArt: couldn't load 'huggingface_access_token.txt' from the webui directory. Will not be able to download/update gated models. Local cache will work.")
 
     torch.set_grad_enabled(False)
+    
+    if style != 0:
+        positive_prompt = styles.styles_list[style][1].replace("{prompt}", positive_prompt)
+        negative_prompt = styles.styles_list[style][2] + negative_prompt
+
+    ####    check img2img
+    if i2iSource == None:
+        maskSource = None
+        i2iDenoise = 1
+    if i2iDenoise < (num_steps + 1) / 1000:
+        i2iDenoise = (num_steps + 1) / 1000
+    if maskSource == None:
+        maskCutOff = 1.0
+    ####    end check img2img
+    
+    ####    enforce safe generation size
+    if PixArtStorage.resolutionBin == False:
+        width  = (width  // 16) * 16
+        height = (height // 16) * 16
+    ####    end enforce safe generation size
 
     ####    identify model type based on name
     isFlash = "flash-pixart" in model
@@ -104,34 +131,17 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
     is2Stage = isSigma and model[-7:] == '-stage1'
 
     useConsistencyVAE = (isSigma == 0) and (vae == 1)
-
+    ####    end: identify model type
+    
+    #### check controlnet
     if not isSigma and controlNet != 0 and controlNetImage != None and controlNetStrength > 0.0:
         useControlNet = ['raulc0399/pixart-alpha-hed-controlnet'][controlNet-1]
     else:
         controlNetImage = None
         controlNetStrength = 0.0
         useControlNet = None
+    #### end check controlnet
 
-
-    if style != 0:
-        positive_prompt = styles.styles_list[style][1].replace("{prompt}", positive_prompt)
-        negative_prompt = styles.styles_list[style][2] + negative_prompt
-
-    if i2iSource == None:
-        maskSource = None
-        i2iDenoise = 1
-    if i2iDenoise < (num_steps + 1) / 1000:
-        i2iDenoise = (num_steps + 1) / 1000
-
-    if maskSource == None:
-        maskCutOff = 1.0
-
-    if PixArtStorage.resolutionBin == False:
-        width  = (width  // 16) * 16
-        height = (height // 16) * 16
-
-    from diffusers.utils import logging
-    logging.set_verbosity(logging.WARN)       #   download information is useful
 
     gc.collect()
     torch.cuda.empty_cache()
@@ -139,83 +149,104 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
     fixed_seed = get_fixed_seed(sampling_seed)
     PixArtStorage.lastSeed = fixed_seed
 
-
-    pipe = None
-
-    useCachedEmbeds = (PixArtStorage.lastPrompt == positive_prompt and PixArtStorage.lastNegative == negative_prompt)
-
-    if useCachedEmbeds:
-        print ("Skipping tokenizer, text_encoder.")
-        tokenizer = None
-        text_encoder = None
-    else:
+    ####    setup pipe for text encoding - all models use same tokenizer+text encoder
+    if PixArtStorage.pipeTE == None:
+        PixArtStorage.pipeTE = pipeline.PixArtPipeline_DoE_combined.from_pretrained(
+            "PixArt-alpha/pixart_sigma_sdxlvae_T5_diffusers",
+            scheduler=None,
+#            tokenizer=None,
+            text_encoder=None,
+            transformer=None,
+            vae=None,
+            torch_dtype=torch.float16
+        )
+        
         ####    tokenizer always the same
-        tokenizer = T5Tokenizer.from_pretrained("PixArt-alpha/pixart_sigma_sdxlvae_T5_diffusers",
-                local_files_only=False, cache_dir=".//models//diffusers//",
-                subfolder="tokenizer", )
+#        PixArtStorage.pipeTE.tokenizer = T5Tokenizer.from_pretrained("PixArt-alpha/pixart_sigma_sdxlvae_T5_diffusers",
+#                local_files_only=False, cache_dir=".//models//diffusers//",
+#                subfolder="tokenizer", )
 
         ####    the T5 text encoder model is always the same, so it's easy to cache and share between PixArt models
         try:
-            text_encoder = T5EncoderModel.from_pretrained(
+            device_map = {  #   how to find which blocks are most important? if any?
+                'shared': 0,
+                'encoder.embed_tokens': 0,
+                'encoder.block.0': 'cpu',
+                'encoder.block.1': 'cpu',
+                'encoder.block.2': 'cpu', 
+                'encoder.block.3': 'cpu', 
+                'encoder.block.4': 'cpu', 
+                'encoder.block.5': 'cpu', 
+                'encoder.block.6': 'cpu', 
+                'encoder.block.7': 'cpu', 
+                'encoder.block.8': 'cpu', 
+                'encoder.block.9': 'cpu', 
+                'encoder.block.10': 'cpu', 
+                'encoder.block.11': 'cpu', 
+                'encoder.block.12': 'cpu', 
+                'encoder.block.13': 'cpu', 
+                'encoder.block.14': 'cpu', 
+                'encoder.block.15': 'cpu', 
+                'encoder.block.16': 'cpu', 
+                'encoder.block.17': 'cpu', 
+                'encoder.block.18': 'cpu', 
+                'encoder.block.19': 'cpu', 
+                'encoder.block.20': 'cpu', 
+                'encoder.block.21': 'cpu', 
+                'encoder.block.22': 'cpu', 
+                'encoder.block.23': 'cpu', 
+                'encoder.final_layer_norm': 0, 
+                'encoder.dropout': 0
+            }
+        
+            PixArtStorage.pipeTE.text_encoder = T5EncoderModel.from_pretrained(
                 ".//models//diffusers//pixart_T5_fp16",
                 variant="fp16",
                 local_files_only=True,
+                device_map=device_map,
                 torch_dtype=torch.float16,
-                device_map="auto", )
+                low_cpu_mem_usage=True,                
+                use_safetensors=True
+            )
+
         except:
-        ##  fetch the T5 model, ~20gigs, load as fp16
-        ##  specifying cache directory because transformers will cache to a different location than diffusers, so you can have 20gigs of T5 twice
-            text_encoder = T5EncoderModel.from_pretrained(
+            ##  fetch the T5 model, ~20gigs, load as fp16
+            PixArtStorage.pipeTE.text_encoder = T5EncoderModel.from_pretrained(
                 "PixArt-alpha/pixart_sigma_sdxlvae_T5_diffusers",
                 local_files_only=False, cache_dir=".//models//diffusers//",
                 subfolder="text_encoder",
-                use_safetensors=True,
-                torch_dtype=torch.float16, )
-##  should I fetch from a different repo? - would be direct fp16 download
+                device_map=device_map,
+                low_cpu_mem_usage=True,                
+                torch_dtype=torch.float16,
+            )
 
             ##  now save the converted fp16 T5 model to local cache, only needs done once
-            text_encoder.to(torch.float16)
-            text_encoder.save_pretrained(
+            PixArtStorage.pipeTE.text_encoder.to(torch.float16)
+            PixArtStorage.pipeTE.text_encoder.save_pretrained(
                 ".//models//diffusers//pixart_T5_fp16",
                 variant="fp16",
-                safe_serialization=True, )
+                safe_serialization=True,
+            )
             print ("Saved fp16 T5 text encoder, will use this from now on.")
 
 ##        try:
 ##            from optimum.bettertransformer import BetterTransformer
 ##            text_encoder = BetterTransformer.transform(text_encoder)
 ##        except:
-##            print ("BetterTransformer not available.")
+##            print ("BetterTransformer not available.")        
 
+        
+    ####    end setup pipe for text encoding
 
-    logging.set_verbosity(logging.ERROR)       #   avoid some console spam from Alpha models missing keys
-
-    if isFlash:
-        pipeModel = "PixArt-alpha/PixArt-XL-2-1024-MS"
-    elif isSigma:
-        pipeModel = "PixArt-alpha/pixart_sigma_sdxlvae_T5_diffusers"
+    ####    encode the prompts, if necessary
+    useCachedEmbeds = (PixArtStorage.lastPrompt == positive_prompt and PixArtStorage.lastNegative == negative_prompt)
+    if useCachedEmbeds:
+        print ("Skipping tokenizer, text_encoder.")
     else:
-        pipeModel = model
+        if isDMD:
+            negative_prompt = ""
 
-    pipe = pipeline.PixArtPipeline_DoE_combined.from_pretrained(
-        pipeModel,
-        tokenizer=tokenizer,
-        text_encoder=text_encoder,
-        transformer=None,
-        vae=None,
-#        controlnet=None,
-        torch_dtype=torch.float16, )
-    del tokenizer, text_encoder
-
-    if isDMD:
-        negative_prompt = ""
-
-    if useCachedEmbeds == False:
-        pos_embeds, pos_attention, neg_embeds, neg_attention = pipe.encode_prompt(positive_prompt, negative_prompt=negative_prompt)
-
-        del pipe.tokenizer, pipe.text_encoder
-        pipe.tokenizer = None
-        pipe.text_encoder = None
+        pos_embeds, pos_attention, neg_embeds, neg_attention = PixArtStorage.pipeTE.encode_prompt(positive_prompt, negative_prompt=negative_prompt)
 
         PixArtStorage.pos_embeds    = pos_embeds.to('cuda').to(torch.float16)
         PixArtStorage.neg_embeds    = neg_embeds.to('cuda').to(torch.float16)
@@ -227,22 +258,51 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         PixArtStorage.lastPrompt = positive_prompt
         PixArtStorage.lastNegative = negative_prompt
 
+#        PixArtStorage.pipeTE.enable_sequential_cpu_offload()
+#        PixArtStorage.pipeTE.maybe_free_model_hooks()
+    ####    end encode prompts
+
     gc.collect()
     torch.cuda.empty_cache()
 
-####    load transformer, same process for Alpha and Sigma
-    base = "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS" if isSigma else "PixArt-alpha/PixArt-XL-2-1024-MS"
-    if isFlash: #   base is an attempt at future proofing - base flash pipeline is currently always Alpha
-        # Load LoRA
-        pipe.transformer = PixArtTransformer2DModel.from_pretrained(
-            base,
-            subfolder="transformer",
+
+    ####    setup pipe for transformer, same process for Alpha and Sigma
+    if isFlash:
+        pipeModel = "PixArt-alpha/PixArt-XL-2-1024-MS"
+    elif isSigma:
+        pipeModel = "PixArt-alpha/pixart_sigma_sdxlvae_T5_diffusers"
+    else:
+        pipeModel = model
+
+    if PixArtStorage.pipeTR == None:
+        PixArtStorage.pipeTR = pipeline.PixArtPipeline_DoE_combined.from_pretrained(
+            pipeModel,
+            tokenizer=None,
+            text_encoder=None,
+            transformer=None,
+            vae=None,
             torch_dtype=torch.float16
         )
-        pipe.transformer = PeftModel.from_pretrained(
-            pipe.transformer,
-            "jasperai/flash-pixart"
-        )
+
+    ####    load transformer only if changed
+    logging.set_verbosity(logging.ERROR)       #   avoid some console spam from Alpha models missing keys
+    if PixArtStorage.lastTR != model:
+        if PixArtStorage.pipeTR.transformer != None:
+            del PixArtStorage.pipeTR.transformer
+
+        base = "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS" if isSigma else "PixArt-alpha/PixArt-XL-2-1024-MS"
+        if isFlash: #   base is an attempt at future proofing - base flash pipeline is currently always Alpha
+            # Load LoRA
+            PixArtStorage.pipeTR.transformer = PixArtTransformer2DModel.from_pretrained(
+                base,
+                low_cpu_mem_usage=True,                
+                subfolder="transformer",
+                torch_dtype=torch.float16
+            )
+            PixArtStorage.pipeTR.transformer = PeftModel.from_pretrained(
+                PixArtStorage.pipeTR.transformer,
+                "jasperai/flash-pixart"
+            )
 #    elif isCustom:
 #        custom = ".//models//diffusers//PixArtCustom//" + model
 #        pipe.transformer = Transformer2DModel.from_single_file(
@@ -253,28 +313,33 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 #            subfolder="transformer",
 #            config=base
 #        )
-    else:
-        try:
-            pipe.transformer = PixArtTransformer2DModel.from_pretrained(
-                model,
-                local_files_only=False, cache_dir=".//models//diffusers//",
-                subfolder='transformer',
-                low_cpu_mem_usage=True, 
-                torch_dtype=torch.float16,
-                token=access_token,
-            )
-        except:
-            print ("PixArt: failed to load transformer. Repository may be gated and require a huggingface access token. See 'README.md'.")
-            PixArtStorage.locked = False
-            return gradio.Button.update(value='Generate', variant='primary', interactive=True), None
+        else:
+            try:
+                PixArtStorage.pipeTR.transformer = PixArtTransformer2DModel.from_pretrained(
+                    model,
+                    local_files_only=False, cache_dir=".//models//diffusers//",
+                    low_cpu_mem_usage=True,                
+                    subfolder='transformer',
+                    torch_dtype=torch.float16,
+                    token=access_token,
+                )
+            except:
+                print ("PixArt: failed to load transformer. Repository may be gated and require a huggingface access token. See 'README.md'.")
+                PixArtStorage.locked = False
+                return gradio.Button.update(value='Generate', variant='primary', interactive=True), None
+
+        PixArtStorage.lastTR = model
+
+    logging.set_verbosity(logging.WARN)       #   download information is useful
+    ####    end load transformer only if changed
 
     if is2Stage:
         refinerModel = model[:-1] + '2'
-        pipe.refiner = PixArtTransformer2DModel.from_pretrained(
+        PixArtStorage.pipeTR.refiner = PixArtTransformer2DModel.from_pretrained(
             refinerModel,
             local_files_only=False, cache_dir=".//models//diffusers//",
+            low_cpu_mem_usage=True,                
             subfolder='transformer',
-            low_cpu_mem_usage=True, 
             torch_dtype=torch.float16,
             token=access_token,
         )
@@ -292,10 +357,12 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 #        local_files_only=True
 #    )
 
-####    VAEs are same for Alpha, and for Sigma. Sigma already shared, now Alpha is too.
 
+    ##  load VAE only if changed
+
+    ####    VAEs are same for Alpha, and for Sigma. Sigma already shared, now Alpha is too.
     if useConsistencyVAE:   #   option for Alpha models
-        pipe.vae = ConsistencyDecoderVAE.from_pretrained(
+        PixArtStorage.pipeTR.vae = ConsistencyDecoderVAE.from_pretrained(
             "openai/consistency-decoder",
             local_files_only=False, cache_dir=".//models//diffusers//",
             torch_dtype=torch.float16)
@@ -304,9 +371,9 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         sourceVAE = "PixArt-alpha/pixart_sigma_sdxlvae_T5_diffusers" if isSigma else "PixArt-alpha/PixArt-XL-2-1024-MS"
 
         try:
-            pipe.vae = AutoencoderKL.from_pretrained(cachedVAE, local_files_only=True, variant="fp16", torch_dtype=torch.float16)
+            PixArtStorage.pipeTR.vae = AutoencoderKL.from_pretrained(cachedVAE, local_files_only=True, variant="fp16", torch_dtype=torch.float16)
         except:
-            pipe.vae = AutoencoderKL.from_pretrained(
+            PixArtStorage.pipeTR.vae = AutoencoderKL.from_pretrained(
                 sourceVAE,
                 local_files_only=False, cache_dir=".//models//diffusers//",
                 subfolder="vae",
@@ -314,38 +381,51 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
                 torch_dtype=torch.float16, )
 
             ##  now save the converted fp16 VAE model to local cache, only needs done once
-            pipe.vae.to(torch.float16)
-            pipe.vae.save_pretrained(
+            PixArtStorage.pipeTR.vae.to(torch.float16)
+            PixArtStorage.pipeTR.vae.save_pretrained(
                 cachedVAE,
                 safe_serialization=True,
                 variant="fp16", )
             print ("Saved fp16 " + ("Sigma" if isSigma else "Alpha") + " VAE, will use this from now on.")
 
 #    pipe.vae.enable_tiling(True) #make optional/based on dimensions
+        # PixArtStorage.pipeTR.transformer.to(memory_format=torch.channels_last)
+        # PixArtStorage.pipeTR.vae.to(memory_format=torch.channels_last)
+
 
     if useControlNet:
-        pipe.controlnet=controlnet.PixArtControlNetAdapterModel.from_pretrained(
-            useControlNet,
-            cache_dir=".//models//diffusers//",
-            use_safetensors=True,
-            torch_dtype=torch.float16
-        )
+        if useControlNet != PixArtStorage.loadedControlNet:
+            PixArtStorage.pipeTR.controlnet=controlnet.PixArtControlNetAdapterModel.from_pretrained(
+                useControlNet,
+                cache_dir=".//models//diffusers//",
+                use_safetensors=True,
+                torch_dtype=torch.float16
+            )
+            PixArtStorage.loadedControlNet = useControlNet
+    else:
+        del PixArtStorage.pipeTR.controlnet
+        PixArtStorage.pipeTR.controlnet = None
+        PixArtStorage.loadedControlNet = None
 
-    pipe.enable_model_cpu_offload()
+    PixArtStorage.pipeTR.enable_model_cpu_offload()     #transformer / refiner/ controlnet is a lot of VRAM
+
+    ####    end setup pipe for transformer
+
 
     #   if using resolution_binning, must use adjusted width/height here (don't overwrite values)
 
     if PixArtStorage.resolutionBin:
-        if pipe.transformer.config.sample_size == 256:
-            aspect_ratio_bin = pipeline.ASPECT_RATIO_2048_BIN
-        elif pipe.transformer.config.sample_size == 128:
-            aspect_ratio_bin = pipeline.ASPECT_RATIO_1024_BIN
-        elif pipe.transformer.config.sample_size == 64:
-            aspect_ratio_bin = pipeline.ASPECT_RATIO_512_BIN
-        elif pipe.transformer.config.sample_size == 32:
-            aspect_ratio_bin = pipeline.ASPECT_RATIO_256_BIN
-        else:
-            raise ValueError("Invalid sample size")
+        match PixArtStorage.pipeTR.transformer.config.sample_size:
+            case 256:
+                aspect_ratio_bin = pipeline.ASPECT_RATIO_2048_BIN
+            case 128:
+                aspect_ratio_bin = pipeline.ASPECT_RATIO_1024_BIN
+            case 64:
+                aspect_ratio_bin = pipeline.ASPECT_RATIO_512_BIN
+            case 32:
+                aspect_ratio_bin = pipeline.ASPECT_RATIO_256_BIN
+            case _:
+                raise ValueError("Invalid sample size")
 
         ar = float(height / width)
         closest_ratio = min(aspect_ratio_bin.keys(), key=lambda ratio: abs(float(ratio) - ar))
@@ -357,9 +437,9 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 
     shape = (
         num_images,
-        pipe.transformer.config.in_channels,
-        int(theight) // pipe.vae_scale_factor,
-        int(twidth) // pipe.vae_scale_factor,
+        PixArtStorage.pipeTR.transformer.config.in_channels,
+        int(theight) // PixArtStorage.pipeTR.vae_scale_factor,
+        int(twidth) // PixArtStorage.pipeTR.vae_scale_factor,
     )
 
     #   always generate the noise here
@@ -367,7 +447,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
     latents = randn_tensor(shape, generator=generator).to('cuda').to(torch.float16)
     
     if PixArtStorage.sharpNoise:
-        minDim = 1 + 2*(min(latents.size(2), latents.size(3)) // 4)
+        minDim = 1 + (min(latents.size(2), latents.size(3)) // 2)
         for b in range(len(latents)):
             blurred = TF.gaussian_blur(latents[b], minDim)
             latents[b] = 1.05*latents[b] - 0.05*blurred
@@ -388,8 +468,9 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         imageB = torch.tensor(numpy.full((8,8), (nb), dtype=numpy.float32))
         image = torch.stack((imageR, imageG, imageB), dim=0).unsqueeze(0)
 
-        image = pipe.image_processor.preprocess(image).to('cuda').to(torch.float16)
-        image_latents = pipe.vae.encode(image).latent_dist.sample(generator) * pipe.vae.config.scaling_factor * pipe.scheduler.init_noise_sigma
+        image = PixArtStorage.pipeTR.image_processor.preprocess(image).to('cuda').to(torch.float16)
+        image_latents = PixArtStorage.pipeTR.vae.encode(image).latent_dist.sample(generator)
+        image_latents *= PixArtStorage.pipeTR.vae.config.scaling_factor * PixArtStorage.pipeTR.scheduler.init_noise_sigma
         image_latents = image_latents.repeat(num_images, 1, latents.size(2), latents.size(3))
 
         for b in range(len(latents)):
@@ -398,16 +479,14 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 
 #        latents += image_latents * PixArtStorage.noiseRGBA[3]
 #        torch.lerp (latents, image_latents, PixArtStorage.noiseRGBA[3], out=latents)
-        pipe.scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
+        scheduler = DDPMScheduler.from_config(PixArtStorage.pipeTR.scheduler.config)
         ts = torch.tensor([int(1000 * (1.0-PixArtStorage.noiseRGBA[3])) - 1], device='cpu')
         ts = ts[:1].repeat(num_images)
 
-        latents = pipe.scheduler.add_noise(image_latents, latents, ts)
+        latents = scheduler.add_noise(image_latents, latents, ts)
 
-        del imageR, imageG, imageB, image, image_latents
+        del imageR, imageG, imageB, image, image_latents, scheduler
     #   end: colour the initial noise
-
-
 
     timesteps = None
 
@@ -420,53 +499,57 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         num_steps = 1
         timesteps = [DMDstep]
 
+
+    #   need to load default scheduler each time, or check if changed
+    schedulerConfig = dict(PixArtStorage.pipeTR.scheduler.config)
+    schedulerConfig['use_karras_sigmas'] = PixArtStorage.karras
+    schedulerConfig['algorithm_type'] = ''  #default??
+    
+
     if isDMD or isLCM:
         scheduler = 'default'
 
     if isFlash:
         # Scheduler
-        pipe.scheduler = LCMScheduler.from_pretrained(
+        PixArtStorage.pipeTR.scheduler = LCMScheduler.from_pretrained(
             "PixArt-alpha/PixArt-XL-2-1024-MS",
             subfolder="scheduler",
             timestep_spacing="trailing",
         )
     elif scheduler == 'DDPM':
-        pipe.scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
+        PixArtStorage.pipeTR.scheduler = DDPMScheduler.from_config(schedulerConfig)
     elif scheduler == 'DEIS':
-        pipe.scheduler = DEISMultistepScheduler.from_config(pipe.scheduler.config)
+        PixArtStorage.pipeTR.scheduler = DEISMultistepScheduler.from_config(schedulerConfig)
     elif scheduler == 'DPM++ 2M':
-        pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
+        PixArtStorage.pipeTR.scheduler = DPMSolverMultistepScheduler.from_config(schedulerConfig)
     elif scheduler == "DPM++ 2M SDE":
-        pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config, algorithm_type='sde-dpmsolver++')
+        schedulerConfig['algorithm_type'] = 'sde-dpmsolver++'
+        PixArtStorage.pipeTR.scheduler = DPMSolverMultistepScheduler.from_config(schedulerConfig)
     elif scheduler == 'DPM':
-        pipe.scheduler = DPMSolverSinglestepScheduler.from_config(pipe.scheduler.config)
+        PixArtStorage.pipeTR.scheduler = DPMSolverSinglestepScheduler.from_config(schedulerConfig)
     elif scheduler == 'DPM SDE':
-        pipe.scheduler = DPMSolverSDEScheduler.from_config(pipe.scheduler.config)
+        PixArtStorage.pipeTR.scheduler = DPMSolverSDEScheduler.from_config(schedulerConfig)
     elif scheduler == 'Euler':
-        pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config)
+        PixArtStorage.pipeTR.scheduler = EulerDiscreteScheduler.from_config(schedulerConfig)
     elif scheduler == 'Euler A':
-        pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
+        PixArtStorage.pipeTR.scheduler = EulerAncestralDiscreteScheduler.from_config(schedulerConfig)
     elif scheduler == 'LCM':
-        pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
+        PixArtStorage.pipeTR.scheduler = LCMScheduler.from_config(schedulerConfig)
     elif scheduler == "SA-solver":
-        pipe.scheduler = SASolverScheduler.from_config(pipe.scheduler.config, algorithm_type='data_prediction')
+        schedulerConfig['algorithm_type'] = 'data_prediction'
+        PixArtStorage.pipeTR.scheduler = SASolverScheduler.from_config(schedulerConfig)
     elif scheduler == 'UniPC':
-        pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
+        PixArtStorage.pipeTR.scheduler = UniPCMultistepScheduler.from_config(schedulerConfig)
 #   else uses default set by model
 
-    pipe.scheduler.config.num_train_timesteps = int(1000 * i2iDenoise)
 
-    if hasattr(pipe.scheduler.config, 'use_karras_sigmas'):
-        pipe.scheduler.config.use_karras_sigmas = PixArtStorage.karras
         
 #    if PixArtStorage.vpred == True:
 #        pipe.scheduler.config.prediction_type = 'v_prediction'
 
-    pipe.transformer.to(memory_format=torch.channels_last)
-    pipe.vae.to(memory_format=torch.channels_last)
 
     with torch.inference_mode():
-        output = pipe(
+        output = PixArtStorage.pipeTR(
             generator                       = generator,
             latents                         = latents,                          #   initial noise, possibly with colour biasing
 
@@ -499,7 +582,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 #   vae uses lots of VRAM, especially with batches, maybe worth output to latent, free memory
 #   but seem to need vae loaded earlier anyway
 
-    del pipe, generator, latents
+    del generator, latents
 
 #    gc.collect()
 #    torch.cuda.empty_cache()
@@ -681,6 +764,7 @@ def on_ui_tabs():
         return gradio.Button.update(variant='secondary'), result
 
 
+
     def toggleGenerate (R, G, B, A):
         PixArtStorage.noiseRGBA = [R, G, B, A]
         PixArtStorage.locked = True
@@ -826,8 +910,7 @@ def on_ui_tabs():
                     return image
         return image
     def toggleSharp ():
-        if not PixArtStorage.locked:
-            PixArtStorage.sharpNoise ^= True
+        PixArtStorage.sharpNoise ^= True
         return gradio.Button.update(value=['s', 'S'][PixArtStorage.sharpNoise],
                                 variant=['secondary', 'primary'][PixArtStorage.sharpNoise])
 
@@ -959,7 +1042,6 @@ def on_ui_tabs():
 #        CNProcess.click(processCN, inputs=[CNSource, CNMethod], outputs=[CNSource])
         SP.click(toggleSP, inputs=[], outputs=SP)
         SP.click(superPrompt, inputs=[positive_prompt, sampling_seed], outputs=[SP, positive_prompt])
-
         sharpNoise.click(toggleSharp, inputs=[], outputs=sharpNoise)
         dims.input(updateWH, inputs=[dims, width, height], outputs=[dims, width, height], show_progress=False)
         parse.click(parsePrompt, inputs=parseCtrls, outputs=parseCtrls, show_progress=False)

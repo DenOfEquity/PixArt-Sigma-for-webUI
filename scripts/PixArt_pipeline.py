@@ -1,4 +1,4 @@
-####    THIS IS main BRANCH, unloads models after use
+####    THIS IS noUnload BRANCH, keeps models in RAM/VRAM to reduce loading time
 
 # Copyright 2024 PixArt-Alpha Authors and The HuggingFace Team. All rights reserved.
 #
@@ -706,13 +706,7 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline, SD3LoraLoaderMixin):#maybe 
                     control_cond = None
                 else:
                     control_cond = control_latents
-
-                if self.refiner != None and t <= 400:
-                    del self.transformer
-                    self.transformer = self.refiner.to('cuda')
-                    del self.refiner
-                    self.refiner = None
-
+                 
                 if control_cond is not None:
                     noise_pred = self.transformer(
                         latent_model_input,
@@ -725,15 +719,25 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline, SD3LoraLoaderMixin):#maybe 
                         return_dict=False,
                     )[0]
                 else:
-                    noise_pred = self.transformer(
-                        latent_model_input,
-                        encoder_hidden_states=prompt_embeds,
-                        encoder_attention_mask=prompt_attention_mask,
-                        timestep=current_timestep,
-                        added_cond_kwargs=added_cond_kwargs,
-                        return_dict=False,
-                    )[0]
-
+                    if self.refiner != None and t <= 400:
+                        noise_pred = self.refiner(
+                            latent_model_input,
+                            encoder_hidden_states=prompt_embeds,
+                            encoder_attention_mask=prompt_attention_mask,
+                            timestep=current_timestep,
+                            added_cond_kwargs=added_cond_kwargs,
+                            return_dict=False,
+                        )[0]
+                    else:
+                        noise_pred = self.transformer(
+                            latent_model_input,
+                            encoder_hidden_states=prompt_embeds,
+                            encoder_attention_mask=prompt_attention_mask,
+                            timestep=current_timestep,
+                            added_cond_kwargs=added_cond_kwargs,
+                            return_dict=False,
+                        )[0]
+#   maually move transformer /refiner between cpu/gpu ?
                 # perform guidance
                 if do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
@@ -762,15 +766,13 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline, SD3LoraLoaderMixin):#maybe 
                         step_idx = i // getattr(self.scheduler, "order", 1)
                         callback(step_idx, t, latents)
 
-        if self.transformer != None:
-            del self.transformer
-            self.transformer = None
-
         if doDiffDiff and 1.0 <= mask_cutoff:
             tmask = (mask >= 1.0)
             latents = (image_latents * ~tmask) + (latents * tmask)
 
-        del control_latents
+        if control_latents is not None:
+            del control_latents
+            self.transformer = self.transformer.transformer     #   undo controlnet change
 
         if not output_type == "latent":
             image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]

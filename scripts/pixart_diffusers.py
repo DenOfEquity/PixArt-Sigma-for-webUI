@@ -1,5 +1,25 @@
 ####    THIS IS main BRANCH, unloads models after use
 
+class PixArtStorage:
+    ModuleReload = False
+    lastSeed = -1
+    galleryIndex = 0
+    lastPrompt = None
+    lastNegative = None
+    pos_embeds = None
+    pos_attention = None
+    neg_embeds = None
+    neg_attention = None
+    noiseRGBA = [0.0, 0.0, 0.0, 0.0]
+    captionToPrompt = False
+    sendAccessToken = False
+    locked = False     #   for preventing changes to the following volatile state while generating
+    karras = False
+    vpred = False
+    resolutionBin = True
+    sharpNoise = False
+    i2iAllSteps = False
+
 import gc
 import gradio
 import math
@@ -7,6 +27,11 @@ import numpy
 import os
 import torch
 import torchvision.transforms.functional as TF
+try:
+    import reload
+    PixArtStorage.ModuleReload = True
+except:
+    PixArtStorage.ModuleReload = False
 
 ##   from webui
 from modules import script_callbacks, images, shared
@@ -38,23 +63,7 @@ import modelsListPA as models
 import scripts.PixArt_pipeline as pipeline
 import scripts.controlnet_pixart as controlnet
 
-class PixArtStorage:
-    lastSeed = -1
-    galleryIndex = 0
-    lastPrompt = None
-    lastNegative = None
-    pos_embeds = None
-    pos_attention = None
-    neg_embeds = None
-    neg_attention = None
-    noiseRGBA = [0.0, 0.0, 0.0, 0.0]
-    captionToPrompt = False
-    sendAccessToken = False
-    locked = False     #   for preventing changes to the following volatile state while generating
-    karras = False
-    vpred = False
-    resolutionBin = True
-    sharpNoise = False
+
 
 # modules/processing.py - don't use ',', '\n', ':' in values
 def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, guidance_rescale, guidance_cutoff, steps, DMDstep, seed, scheduler, width, height):
@@ -78,7 +87,7 @@ def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, gui
 
     return f"Model: {model}\n{prompt_text}{generation_params_text}{noise_text}"
 
-def predict(positive_prompt, negative_prompt, model, vae, width, height, guidance_scale, guidance_rescale, guidance_cutoff, num_steps, DMDstep, sampling_seed, num_images, scheduler, i2iSource, i2iDenoise, maskSource, maskCutOff, style, controlNetImage, controlNet, controlNetStrength, controlNetStart, controlNetEnd, *args):
+def predict(positive_prompt, negative_prompt, model, vae, width, height, guidance_scale, guidance_rescale, guidance_cutoff, num_steps, DMDstep, sampling_seed, num_images, scheduler, i2iSource, i2iDenoise, maskType, maskSource, maskBlur, maskCutOff, style, controlNetImage, controlNet, controlNetStrength, controlNetStart, controlNetEnd, *args):
     
     access_token = 0
     if PixArtStorage.sendAccessToken == True:
@@ -112,19 +121,36 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         controlNetStrength = 0.0
         useControlNet = None
 
-
     if style != 0:
         positive_prompt = styles.styles_list[style][1].replace("{prompt}", positive_prompt)
         negative_prompt = styles.styles_list[style][2] + negative_prompt
 
+    ####    check img2img
     if i2iSource == None:
-        maskSource = None
+        maskType = 0
         i2iDenoise = 1
-    if i2iDenoise < (num_steps + 1) / 1000:
-        i2iDenoise = (num_steps + 1) / 1000
-
     if maskSource == None:
-        maskCutOff = 1.0
+        maskType = 0
+    if PixArtStorage.i2iAllSteps == True:
+        num_steps = int(num_steps / i2iDenoise)
+        
+    match maskType:
+        case 0:     #   'none'
+            maskSource = None
+            maskBlur = 0
+            maskCutOff = 1.0
+        case 1:     #   'image'
+            maskSource = maskSource['image']
+        case 2:     #   'drawn'
+            maskSource = maskSource['mask']
+        case _:
+            maskSource = None
+            maskBlur = 0
+            maskCutOff = 1.0
+
+    if maskBlur > 0:
+        maskSource = TF.gaussian_blur(maskSource, 1+2*maskBlur)
+    ####    end check img2img
 
     if PixArtStorage.resolutionBin == False:
         width  = (width  // 16) * 16
@@ -454,8 +480,6 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
 #   else uses default set by model
 
-    pipe.scheduler.config.num_train_timesteps = int(1000 * i2iDenoise)
-
     if hasattr(pipe.scheduler.config, 'use_karras_sigmas'):
         pipe.scheduler.config.use_karras_sigmas = PixArtStorage.karras
         
@@ -471,8 +495,8 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
             latents                         = latents,                          #   initial noise, possibly with colour biasing
 
             image                           = i2iSource,
-            mask_image                      = maskSource,
             strength                        = i2iDenoise,
+            mask_image                      = maskSource,
             mask_cutoff                     = maskCutOff,
             control_image                   = controlNetImage,
             controlnet_conditioning_scale   = controlNetStrength,
@@ -536,13 +560,9 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 
 
 def on_ui_tabs():
-    try:    # check for Forge, this module reload doesn't work in A1111
-        _ = import_module("modules_forge.config")
-        import reload
+    if PixArtStorage.ModuleReload:
         reload (models)
         reload (pipeline)
-    except:
-        pass
     
     models_list = models.models_list_alpha + models.models_list_sigma
     defaultModel = models.defaultModel
@@ -645,6 +665,12 @@ def on_ui_tabs():
 #           PixArtStorage.vpred ^= True
 #        return gradio.Button.update(variant='primary' if PixArtStorage.vpred == True else 'secondary',
 #                                value='\U0001D415' if PixArtStorage.vpred == True else '\U0001D54D')
+    def toggleAS ():
+        if not PixArtStorage.locked:
+            PixArtStorage.i2iAllSteps ^= True
+        return gradio.Button.update(variant=['secondary', 'primary'][PixArtStorage.i2iAllSteps])
+
+
     def toggleSP ():
         if not PixArtStorage.locked:
             return gradio.Button.update(variant='primary')
@@ -656,7 +682,7 @@ def on_ui_tabs():
                 'roborovski/superprompt-v1',
                 cache_dir='.//models//diffusers//',
             )
-            shared.SuperPrompttokenizer = tokenizer
+            shared.SuperPrompt_tokenizer = tokenizer
         if superprompt is None:
             superprompt = T5ForConditionalGeneration.from_pretrained(
                 'roborovski/superprompt-v1',
@@ -831,6 +857,13 @@ def on_ui_tabs():
         return gradio.Button.update(value=['s', 'S'][PixArtStorage.sharpNoise],
                                 variant=['secondary', 'primary'][PixArtStorage.sharpNoise])
 
+
+    def maskFromImage (image):
+        if image:
+            return image, 'drawn'
+        else:
+            return None, 'none'
+
     with gradio.Blocks() as pixartsigma2_block:
         with ResizeHandleRow():
             with gradio.Column():
@@ -844,13 +877,13 @@ def on_ui_tabs():
 #                    vpred = ToolButton(value="\U0001D54D", variant='secondary', tooltip="use v-prediction")
 
                 with gradio.Row():
-                    positive_prompt = gradio.Textbox(label='Prompt', placeholder='Enter a prompt here...', default='', lines=2)
+                    positive_prompt = gradio.Textbox(label='Prompt', placeholder='Enter a prompt here...', default='', lines=2, show_label=False)
                     parse = ToolButton(value="↙️", variant='secondary', tooltip="parse")
                     SP = ToolButton(value='ꌗ', variant='secondary', tooltip='zero out negative embeds')
 
                 with gradio.Row():
-                    negative_prompt = gradio.Textbox(label='Negative', placeholder='', lines=2)
-                    style = gradio.Dropdown([x[0] for x in styles.styles_list], label='Style', value="(None)", type='index', scale=0)
+                    negative_prompt = gradio.Textbox(label='Negative', placeholder='Negative prompt', default='', lines=1.01, show_label=False)
+                    style = gradio.Dropdown([x[0] for x in styles.styles_list], label='Style', value="[style] (None)", type='index', scale=0, show_label=False)
                 with gradio.Row():
                     width = gradio.Slider(label='Width', minimum=128, maximum=4096, step=16, value=defaultWidth, elem_id="PixArtSigma_width")
                     swapper = ToolButton(value="\U000021C4")
@@ -893,17 +926,27 @@ def on_ui_tabs():
                 with gradio.Accordion(label='image to image', open=False):
                     with gradio.Row():
                         i2iSource = gradio.Image(label='image to image source', sources=['upload'], type='pil', interactive=True, show_download_button=False)
-                        maskSource = gradio.Image(label='source mask', sources=['upload'], type='pil', interactive=True, show_download_button=False)
+                        maskSource = gradio.Image(label='source mask', sources=['upload'], type='pil', interactive=True, show_download_button=False, tool='sketch', image_mode='RGB', brush_color='#F0F0F0')#opts.img2img_inpaint_mask_brush_color)
+                    with gradio.Row():
                         with gradio.Column():
-                            i2iDenoise = gradio.Slider(label='Denoise', minimum=0.00, maximum=1.0, step=0.01, value=0.5)
-                            i2iSetWH = gradio.Button(value='Set Width / Height from image')
-                            i2iFromGallery = gradio.Button(value='Get image from gallery')
                             with gradio.Row():
-                                i2iCaption = gradio.Button(value='Caption this image (Florence-2)', scale=7)
+                                i2iDenoise = gradio.Slider(label='Denoise', minimum=0.00, maximum=1.0, step=0.01, value=0.5)
+                                AS = ToolButton(value='AS')
+                            with gradio.Row():
+                                i2iFromGallery = gradio.Button(value='Get gallery image')
+                                i2iSetWH = gradio.Button(value='Set size from image')
+                                #copytoMask, set mode drawn
+                            with gradio.Row():
+                                i2iCaption = gradio.Button(value='Caption image (Florence-2)', scale=6)
                                 toPrompt = ToolButton(value='P', variant='secondary')
-                            maskCut = gradio.Slider(label='Ignore Mask after step', minimum=0.00, maximum=1.0, step=0.01, value=1.0)
 
-                ctrls = [positive_prompt, negative_prompt, model, vae, width, height, guidance_scale, guidance_rescale, guidance_cutoff, steps, DMDstep, sampling_seed, batch_size, scheduler, i2iSource, i2iDenoise, maskSource, maskCut, style, CNSource, CNMethod, CNStrength, CNStart, CNEnd]
+                        with gradio.Column():
+                            maskType = gradio.Dropdown(['none', 'image', 'drawn'], value='none', label='Mask', type='index')
+                            maskCut = gradio.Slider(label='Ignore Mask after step', minimum=0.00, maximum=1.0, step=0.01, value=1.0)
+                            maskBlur = gradio.Slider(label='Blur mask radius', minimum=0, maximum=25, step=1, value=0)
+                            maskCopy = gradio.Button(value='use i2i source as template')
+
+                ctrls = [positive_prompt, negative_prompt, model, vae, width, height, guidance_scale, guidance_rescale, guidance_cutoff, steps, DMDstep, sampling_seed, batch_size, scheduler, i2iSource, i2iDenoise, maskType, maskSource, maskBlur, maskCut, style, CNSource, CNMethod, CNStrength, CNStart, CNEnd]
                 
                 parseCtrls = [positive_prompt, negative_prompt, width, height, sampling_seed, scheduler, steps, guidance_scale, guidance_rescale, guidance_cutoff, initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA]
 
@@ -955,10 +998,13 @@ def on_ui_tabs():
             outputs=dims,
             show_progress=False
         )
+        
 #        vpred.click(toggleVP, inputs=[], outputs=vpred)
 #        CNProcess.click(processCN, inputs=[CNSource, CNMethod], outputs=[CNSource])
         SP.click(toggleSP, inputs=[], outputs=SP)
         SP.click(superPrompt, inputs=[positive_prompt, sampling_seed], outputs=[SP, positive_prompt])
+
+        maskCopy.click(fn=maskFromImage, inputs=[i2iSource], outputs=[maskSource, maskType])
 
         sharpNoise.click(toggleSharp, inputs=[], outputs=sharpNoise)
         dims.input(updateWH, inputs=[dims, width, height], outputs=[dims, width, height], show_progress=False)
@@ -969,6 +1015,7 @@ def on_ui_tabs():
         swapper.click(fn=None, _js="function(){switchWidthHeight('PixArtSigma')}", inputs=None, outputs=None, show_progress=False)
         random.click(randomSeed, inputs=[], outputs=sampling_seed, show_progress=False)
         reuseSeed.click(reuseLastSeed, inputs=[], outputs=sampling_seed, show_progress=False)
+        AS.click(toggleAS, inputs=[], outputs=AS)
 
         i2iSetWH.click (fn=i2iSetDimensions, inputs=[i2iSource, width, height], outputs=[width, height], show_progress=False)
         i2iFromGallery.click (fn=i2iImageFromGallery, inputs=[output_gallery], outputs=[i2iSource])

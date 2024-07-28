@@ -45,6 +45,7 @@ I can generate using all models, though the 2K Sigma model is very slow on my li
 
 #### 27/07/2024 ####
 * added drawing of masks for image to image. Load/copy the source image into the mask, to use as a template.
+* added option to keep models loaded
 
 #### 24/07/2024 ####
 * added SuperPrompt button (ꌗ) to rewrite simple prompts with more detail. This **overwrites** the prompt. Read about SuperPrompt [here](https://brianfitzgerald.xyz/prompt-augmentation). Credit to BrianFitzgerald for the model. (all my alternate model extensions are updated to use this; the model is loaded to a shared location so there's no wasted memory due to duplicates.)

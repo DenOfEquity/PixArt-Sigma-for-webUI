@@ -39,6 +39,8 @@ I can generate using all models, though the 2K Sigma model is very slow on my li
 >[!NOTE]
 > models are freed after use, reloaded for each run. For me, this is faster overall than keeping them in memory, using a decent but not top-end SSD. But, if you're running from mechanical HD instead this might be terrible.
 
+> Updated: added option to keep models loaded
+
 ---
 <details>
 <summary>Change log</summary>

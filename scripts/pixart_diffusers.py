@@ -194,22 +194,23 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         
         ####    tokenizer always the same, load with pipe
         ####    the T5 text encoder model is always the same, so it's easy to cache and share between PixArt models
+        if PixArtStorage.noUnload == True:     #   will keep model loaded
+            device_map = {  #   how to find which blocks are most important? if any?
+                'shared': 0,
+                'encoder.embed_tokens': 0,
+                'encoder.block.0': 'cpu',   'encoder.block.1': 'cpu',   'encoder.block.2': 'cpu',   'encoder.block.3': 'cpu', 
+                'encoder.block.4': 'cpu',   'encoder.block.5': 'cpu',   'encoder.block.6': 'cpu',   'encoder.block.7': 'cpu', 
+                'encoder.block.8': 'cpu',   'encoder.block.9': 'cpu',   'encoder.block.10': 'cpu',  'encoder.block.11': 'cpu', 
+                'encoder.block.12': 'cpu',  'encoder.block.13': 'cpu',  'encoder.block.14': 'cpu',  'encoder.block.15': 'cpu', 
+                'encoder.block.16': 'cpu',  'encoder.block.17': 'cpu',  'encoder.block.18': 'cpu',  'encoder.block.19': 'cpu', 
+                'encoder.block.20': 0,  'encoder.block.21': 0,  'encoder.block.22': 0,  'encoder.block.23': 0, 
+                'encoder.final_layer_norm': 0, 
+                'encoder.dropout': 0
+            }
+        else:                               #   will delete model after use
+            device_map = 'auto'
+
         try:
-            if PixArtStorage.noUnload == True:     #   will keep model loaded
-                device_map = {  #   how to find which blocks are most important? if any?
-                    'shared': 0,
-                    'encoder.embed_tokens': 0,
-                    'encoder.block.0': 'cpu',   'encoder.block.1': 'cpu',   'encoder.block.2': 'cpu',   'encoder.block.3': 'cpu', 
-                    'encoder.block.4': 'cpu',   'encoder.block.5': 'cpu',   'encoder.block.6': 'cpu',   'encoder.block.7': 'cpu', 
-                    'encoder.block.8': 'cpu',   'encoder.block.9': 'cpu',   'encoder.block.10': 'cpu',  'encoder.block.11': 'cpu', 
-                    'encoder.block.12': 'cpu',  'encoder.block.13': 'cpu',  'encoder.block.14': 'cpu',  'encoder.block.15': 'cpu', 
-                    'encoder.block.16': 'cpu',  'encoder.block.17': 'cpu',  'encoder.block.18': 'cpu',  'encoder.block.19': 'cpu', 
-                    'encoder.block.20': 0,  'encoder.block.21': 0,  'encoder.block.22': 0,  'encoder.block.23': 0, 
-                    'encoder.final_layer_norm': 0, 
-                    'encoder.dropout': 0
-                }
-            else:                               #   will delete model after use
-                device_map = 'auto'
             print ("PixArt: loading T5 ...", end="\r", flush=True)
             PixArtStorage.pipeTE.text_encoder = T5EncoderModel.from_pretrained(
                 ".//models//diffusers//pixart_T5_fp16",
@@ -227,19 +228,32 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
                 "PixArt-alpha/pixart_sigma_sdxlvae_T5_diffusers",
                 local_files_only=False, cache_dir=".//models//diffusers//",
                 subfolder="text_encoder",
-                device_map='auto',
                 low_cpu_mem_usage=True,                
                 torch_dtype=torch.float16,
             )
 
             ##  now save the converted fp16 T5 model to local cache, only needs done once
+            print ("PixArt: Saving T5 text encoder as fp16 ...", end="\r", flush=True)
             PixArtStorage.pipeTE.text_encoder.to(torch.float16)
             PixArtStorage.pipeTE.text_encoder.save_pretrained(
-                ".//models//diffusers//pixart_T5_fp16",
+                save_directory=".//models//diffusers//pixart_T5_fp16",
                 variant="fp16",
                 safe_serialization=True,
+                max_shard_size="10GB"
             )
-            print ("Saved fp16 T5 text encoder, will use this from now on.")
+            print ("PixArt: Saving T5 text encoder as fp16 ... done, will use this from now on.")
+            
+            del PixArtStorage.pipeTE.text_encoder
+            print ("PixArt: reloading T5 text encoder with device_map")
+            PixArtStorage.pipeTE.text_encoder = T5EncoderModel.from_pretrained(
+                ".//models//diffusers//pixart_T5_fp16",
+                variant="fp16",
+                local_files_only=True,
+                device_map=device_map,
+                torch_dtype=torch.float16,
+                low_cpu_mem_usage=True,                
+                use_safetensors=True
+            )
 
 ##        try:
 ##            from optimum.bettertransformer import BetterTransformer
@@ -283,6 +297,8 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
     ####    setup pipe for transformer, same process for Alpha and Sigma
     if isFlash:
         pipeModel = "PixArt-alpha/PixArt-XL-2-1024-MS"
+    elif isDMD:
+        pipeModel = "PixArt-alpha/PixArt-XL-2-512x512"
     elif isSigma:
         pipeModel = "PixArt-alpha/pixart_sigma_sdxlvae_T5_diffusers"
     else:
@@ -301,6 +317,8 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
     ####    load transformer only if changed
     logging.set_verbosity(logging.ERROR)       #   avoid some console spam from Alpha models missing keys
     if PixArtStorage.lastTR != model:
+        print ("PixArt: loading transformer ...", end="\r", flush=True)
+
         if PixArtStorage.pipeTR.transformer != None:
             del PixArtStorage.pipeTR.transformer
 
@@ -399,7 +417,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
             ##  now save the converted fp16 VAE model to local cache, only needs done once
             PixArtStorage.pipeTR.vae.to(torch.float16)
             PixArtStorage.pipeTR.vae.save_pretrained(
-                cachedVAE,
+                save_directory=cachedVAE,
                 safe_serialization=True,
                 variant="fp16", )
             print ("Saved fp16 " + ("Sigma" if isSigma else "Alpha") + " VAE, will use this from now on.")
@@ -407,7 +425,6 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 #    pipe.vae.enable_tiling(True) #make optional/based on dimensions
         # PixArtStorage.pipeTR.transformer.to(memory_format=torch.channels_last)
         # PixArtStorage.pipeTR.vae.to(memory_format=torch.channels_last)
-
 
     if useControlNet:
         if useControlNet != PixArtStorage.loadedControlNet:
@@ -519,8 +536,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
     #   need to load default scheduler each time, or check if changed
     schedulerConfig = dict(PixArtStorage.pipeTR.scheduler.config)
     schedulerConfig['use_karras_sigmas'] = PixArtStorage.karras
-    schedulerConfig['algorithm_type'] = ''  #default??
-    
+    schedulerConfig.pop('algorithm_type', None) 
 
     if isDMD or isLCM:
         scheduler = 'default'
@@ -556,7 +572,9 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         PixArtStorage.pipeTR.scheduler = SASolverScheduler.from_config(schedulerConfig)
     elif scheduler == 'UniPC':
         PixArtStorage.pipeTR.scheduler = UniPCMultistepScheduler.from_config(schedulerConfig)
-#   else uses default set by model
+    else:
+        PixArtStorage.pipeTR.scheduler = DDPMScheduler.from_config(schedulerConfig)
+
 
 
         
@@ -592,6 +610,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
             use_resolution_binning          = PixArtStorage.resolutionBin,
             timesteps                       = timesteps,
             isSigma                         = isSigma,
+            isDMD                           = isDMD,
             noUnload                        = PixArtStorage.noUnload,
         )
         if PixArtStorage.noUnload == False:
@@ -649,7 +668,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 
 
     if PixArtStorage.noUnload == False:
-        PixArtStorage.pipeTR = None
+        PixArtStorage.pipeTR.vae = None     #   currently always loaded
     del output
     gc.collect()
     torch.cuda.empty_cache()

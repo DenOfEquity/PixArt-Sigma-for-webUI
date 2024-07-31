@@ -540,6 +540,7 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline, SD3LoraLoaderMixin):#maybe 
         use_resolution_binning: bool = True,
         max_sequence_length: int = 300, #Alpha was 120
         isSigma: bool = True,
+        isDMD: bool = False,
         
         image: PipelineImageInput = None,
         strength: float = 0.6,
@@ -757,7 +758,7 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline, SD3LoraLoaderMixin):#maybe 
                     noise_pred = noise_pred
 
                 # compute previous image: x_t -> x_t-1
-                if num_inference_steps == 1:
+                if isDMD and num_inference_steps == 1:
                     # For DMD one step sampling: https://arxiv.org/abs/2311.18828
                     latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).pred_original_sample
                 else:

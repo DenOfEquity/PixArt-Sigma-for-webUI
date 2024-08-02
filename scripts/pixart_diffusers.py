@@ -362,12 +362,11 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 
         PixArtStorage.lastTR = model
 
-    logging.set_verbosity(logging.WARN)       #   download information is useful
     ####    end load transformer only if changed
 
-    if is2Stage and not PixArtStorage.loadedRefiner and PixArtStorage.lastTR != model:
+    if is2Stage:
         refinerModel = model[:-1] + '2'
-        if PixArtStorage.lastRefiner != refinerModelor or (not PixArtStorage.loadedRefiner):
+        if PixArtStorage.lastRefiner != refinerModel:
             PixArtStorage.pipeTR.refiner = PixArtTransformer2DModel.from_pretrained(
                 refinerModel,
                 local_files_only=False, cache_dir=".//models//diffusers//",
@@ -377,6 +376,12 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
                 token=access_token,
             ).to('cuda')
             PixArtStorage.lastRefiner = refinerModel
+    else:
+        PixArtStorage.pipeTR.refiner = None
+        PixArtStorage.lastRefiner = None
+
+
+    logging.set_verbosity(logging.WARN)
             
 ##    # LoRA model -can't find examples in necessary form
 #    loraLocation = ".//models//diffusers//PixArtLora//Wednesday.safetensors"

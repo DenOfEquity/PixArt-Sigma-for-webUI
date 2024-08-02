@@ -238,9 +238,9 @@ def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
     noise_cfg = guidance_rescale * noise_pred_rescaled + (1 - guidance_rescale) * noise_cfg
     return noise_cfg
 
-from diffusers.loaders import FromSingleFileMixin, SD3LoraLoaderMixin
+#from diffusers.loaders import FromSingleFileMixin, SD3LoraLoaderMixin #maybe PAGMixin
 
-class PixArtPipeline_DoE_combined(DiffusionPipeline, SD3LoraLoaderMixin):#maybe PAGMixin
+class PixArtPipeline_DoE_combined(DiffusionPipeline):
 
     bad_punct_regex = re.compile(
         r"["
@@ -721,8 +721,6 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline, SD3LoraLoaderMixin):#maybe 
                     )[0]
                 else:
                     if self.refiner != None and t <= 400:
-                        if noUnload == False and self.transformer != None:
-                            self.transformer = None
                         noise_pred = self.refiner(
                             latent_model_input,
                             encoder_hidden_states=prompt_embeds,
@@ -754,8 +752,6 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline, SD3LoraLoaderMixin):#maybe 
                 # learned sigma
                 if self.transformer.config.out_channels // 2 == latent_channels:
                     noise_pred = noise_pred.chunk(2, dim=1)[0]
-                else:
-                    noise_pred = noise_pred
 
                 # compute previous image: x_t -> x_t-1
                 if isDMD and num_inference_steps == 1:
@@ -770,9 +766,6 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline, SD3LoraLoaderMixin):#maybe 
                     if callback is not None and i % callback_steps == 0:
                         step_idx = i // getattr(self.scheduler, "order", 1)
                         callback(step_idx, t, latents)
-
-        if noUnload == False and self.transformer != None:
-            self.transformer = None
 
         if doDiffDiff and 1.0 <= mask_cutoff:
             tmask = (mask >= 1.0)

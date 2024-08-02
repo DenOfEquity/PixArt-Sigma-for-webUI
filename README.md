@@ -10,7 +10,7 @@ Go to the **Extensions** tab, then **Install from URL**, use the URL for this re
 
 Easiest way to ensure necessary versions are installed is to edit `requirements_versions.txt` in the webUI folder.
 ```
-diffusers>=0.28.1
+diffusers>=0.29.2
 tokenizers>=0.19
 transformers>=4.40
 peft

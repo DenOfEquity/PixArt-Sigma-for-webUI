@@ -820,7 +820,7 @@ def on_ui_tabs():
                 'roborovski/superprompt-v1',
                 cache_dir='.//models//diffusers//',
             )
-            shared.SuperPrompttokenizer = tokenizer
+            shared.SuperPrompt_tokenizer = tokenizer
         if superprompt is None:
             superprompt = T5ForConditionalGeneration.from_pretrained(
                 'roborovski/superprompt-v1',

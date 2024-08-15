@@ -14,6 +14,7 @@ models_list_sigma = [
     "PixArt-alpha/PixArt-Sigma-XL-2-2K-MS",                    #   undertrained
     "ptx0/pixart-900m-1024-ft",
     "TensorFamily/SigmaJourney",
+    "ptx0/pixart-900m-1024-ft-v0.7-stage1",
 #    "frutiemax/TwistedReality-pixart-1024ms",
 #    "frutiemax/VintageKnockers-Pixart-Sigma-XL-2-512-MS",      #   nsfw
 #    "frutiemax/VintageKnockers-Pixart-Sigma-XL-2-1024-MS",     #   nsfw

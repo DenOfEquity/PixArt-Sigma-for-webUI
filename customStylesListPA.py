@@ -1,6 +1,6 @@
 ####    shamelessly copied from PixArt repo on Github
 styles_list = [
-    ("(None)", "", ""),
+    ("[style] (None)", "", ""),
     (
     "Cinematic",
     "cinematic still {prompt} . emotional, harmonious, vignette, highly detailed, high budget, bokeh, cinemascope, moody, epic, gorgeous, film grain, grainy",

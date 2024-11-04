@@ -19,7 +19,7 @@ peft
 ```
 These upgrades didn't break anything for me.
 
-Forge2 already has newer versions of tokenizers and transformers. Be aware that updates to Forge2 may overwrite the requirements file.
+Forge2 already has newer versions of tokenizers and transformers, and recently pinned to diffusers 0.31. Be aware that updates to Forge2 may overwrite the requirements file.
 
 
 ---

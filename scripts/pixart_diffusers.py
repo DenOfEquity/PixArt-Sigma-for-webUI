@@ -1,9 +1,15 @@
-####    THIS IS combined main/noUnload BRANCH, keeps models in RAM/VRAM to reduce loading time
+####    THIS IS combined main/noUnload BRANCH, optionally keeps models in RAM/VRAM to reduce loading time
 ####    noUnload:   with 16GB RAM this is not an improvement if loading from fast SSD
 ####                more RAM, slow HD: likely better overall performance
 
+from diffusers.utils import check_min_version
+check_min_version("0.30.0")
+
+
+
 class PixArtStorage:
     ModuleReload = False
+    usingGradio4 = False
     pipeTE = None
     pipeTR = None
     lastTR = None
@@ -21,6 +27,7 @@ class PixArtStorage:
     noiseRGBA = [0.0, 0.0, 0.0, 0.0]
     captionToPrompt = False
     sendAccessToken = False
+    doneAccessTokenWarning = False
 
     locked = False     #   for preventing changes to the following volatile state while generating
     noUnload = False
@@ -32,13 +39,15 @@ class PixArtStorage:
 
 import gc
 import gradio
+if int(gradio.__version__[0]) == 4:
+    PixArtStorage.usingGradio4 = True
 import math
 import numpy
 import os
 import torch
 import torchvision.transforms.functional as TF
 try:
-    import reload
+    from importlib import reload
     PixArtStorage.ModuleReload = True
 except:
     PixArtStorage.ModuleReload = False
@@ -76,7 +85,7 @@ import scripts.controlnet_pixart as controlnet
 
 
 # modules/processing.py - don't use ',', '\n', ':' in values
-def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, guidance_rescale, guidance_cutoff, steps, DMDstep, seed, scheduler, width, height, controlNetSettings):
+def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, guidance_rescale, guidance_cutoff, PAG_scale, PAG_adapt, steps, DMDstep, seed, scheduler, width, height, controlNetSettings):
     karras = " : Karras" if PixArtStorage.karras == True else ""
     vpred = " : V-Prediction" if PixArtStorage.vpred == True else ""
     isDMD = "PixArt-Alpha-DMD" in model
@@ -87,6 +96,7 @@ def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, gui
         "DMDstep": DMDstep if isDMD else None,
         "Steps": steps if not isDMD else None,
         "CFG": f"{guidance_scale} ({guidance_rescale}) [{guidance_cutoff}]",
+        "PAG": f"{PAG_scale} ({PAG_adapt})",
         "controlNet"    :   controlNetSettings,
     }
 #add i2i marker?
@@ -98,21 +108,31 @@ def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, gui
 
     return f"Model: {model}\n{prompt_text}{generation_params_text}{noise_text}"
 
-def predict(positive_prompt, negative_prompt, model, vae, width, height, guidance_scale, guidance_rescale, guidance_cutoff, num_steps, DMDstep, sampling_seed, num_images, scheduler, i2iSource, i2iDenoise, maskType, maskSource, maskBlur, maskCutOff, style, controlNetImage, controlNet, controlNetStrength, controlNetStart, controlNetEnd, *args):
-    
+def predict(positive_prompt, negative_prompt, model, vae, width, height, guidance_scale, guidance_rescale, guidance_cutoff, num_steps, DMDstep, sampling_seed, num_images, scheduler, i2iSource, i2iDenoise, maskType, maskSource, maskBlur, maskCutOff, style, controlNetImage, controlNet, controlNetStrength, controlNetStart, controlNetEnd, PAG_scale, PAG_adapt, *args):
+ 
+    logging.set_verbosity(logging.ERROR)        #   diffusers and transformers both enjoy spamming the console with useless info
+ 
     access_token = 0
     if PixArtStorage.sendAccessToken == True:
         try:
             with open('huggingface_access_token.txt', 'r') as file:
                 access_token = file.read().strip()
         except:
-            print ("PixArt: couldn't load 'huggingface_access_token.txt' from the webui directory. Will not be able to download/update gated models. Local cache will work.")
+            if PixArtStorage.doneAccessTokenWarning == False:
+                print ("PixArt: couldn't load 'huggingface_access_token.txt' from the webui directory. Will not be able to download/update gated models. Local cache will work.")
+                PixArtStorage.doneAccessTokenWarning = True
 
     torch.set_grad_enabled(False)
     
     if style != 0:
         positive_prompt = styles.styles_list[style][1].replace("{prompt}", positive_prompt)
-        negative_prompt = styles.styles_list[style][2] + negative_prompt
+        negative_prompt = negative_prompt + styles.styles_list[style][2]
+        
+    if PAG_scale > 0.0:
+        if guidance_rescale < 1.0:
+            guidance_rescale = 1.0
+        if guidance_cutoff < 1.0:
+            guidance_cutoff = 1.0
 
     ####    check img2img
     if i2iSource == None:
@@ -129,9 +149,11 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
             maskBlur = 0
             maskCutOff = 1.0
         case 1:     #   'image'
-            maskSource = maskSource['image']
+            maskSource = maskSource['background'] if PixArtStorage.usingGradio4 else maskSource['image']
         case 2:     #   'drawn'
-            maskSource = maskSource['mask']
+            maskSource = maskSource['layers'][0] if PixArtStorage.usingGradio4 else maskSource['mask']
+        case 3:     #   'composite'
+            maskSource = maskSource['composite'] if PixArtStorage.usingGradio4 else maskSource['image']
         case _:
             maskSource = None
             maskBlur = 0
@@ -210,19 +232,30 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         else:                               #   will delete model after use
             device_map = 'auto'
 
-        try:
+        try:                                #   self converted fp16 T5
             print ("PixArt: loading T5 ...", end="\r", flush=True)
             PixArtStorage.pipeTE.text_encoder = T5EncoderModel.from_pretrained(
-                ".//models//diffusers//pixart_T5_fp16",
-                variant="fp16",
+                './/models//diffusers//pixart_T5_fp16',
+                variant='fp16',
                 local_files_only=True,
                 device_map=device_map,
                 torch_dtype=torch.float16,
                 low_cpu_mem_usage=True,                
                 use_safetensors=True
             )
-
         except:
+            #   fetch SD3 T5 instead - avoids downloading double size model from PixArt repo
+            #   won't use, because gated repo - extra steps for users which aren't strictly necessary
+            #   could nest another try block?
+#            PixArtStorage.pipeTE.text_encoder = T5EncoderModel.from_pretrained(
+#                'stabilityai/stable-diffusion-3-medium-diffusers',
+#                subfolder='text_encoder_3',
+#                local_files_only=False,
+#                device_map=device_map,
+#                torch_dtype=torch.float16,
+#                low_cpu_mem_usage=True,                
+#            )
+
             ##  fetch the T5 model, ~20gigs, load as fp16
             PixArtStorage.pipeTE.text_encoder = T5EncoderModel.from_pretrained(
                 "PixArt-alpha/pixart_sigma_sdxlvae_T5_diffusers",
@@ -270,10 +303,10 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
     else:
         print ("PixArt: encoding prompt ...", end="\r", flush=True)
 
-        if isDMD:
+        if isDMD or negative_prompt is None:
             negative_prompt = ""
 
-        pos_embeds, pos_attention, neg_embeds, neg_attention = PixArtStorage.pipeTE.encode_prompt(positive_prompt, negative_prompt=negative_prompt)
+        pos_embeds, pos_attention, neg_embeds, neg_attention = PixArtStorage.pipeTE.encode_prompt(positive_prompt, negative_prompt=negative_prompt, isSigma=isSigma)
 
         print ("PixArt: encoding prompt ... done")
         PixArtStorage.pos_embeds    = pos_embeds.to('cuda').to(torch.float16)
@@ -315,7 +348,6 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         )
 
     ####    load transformer only if changed
-    logging.set_verbosity(logging.ERROR)       #   avoid some console spam from Alpha models missing keys
     if PixArtStorage.lastTR != model:
         print ("PixArt: loading transformer ...", end="\r", flush=True)
 
@@ -364,6 +396,20 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 
     ####    end load transformer only if changed
 
+#   lora test - diffusers type, PEFT
+#   seems to work, but base model better
+#   possibly: model.load_adapter(loraRepo)
+#             model.unload()                #   but are these in PixArtTransformer?
+##    if isSigma and not is2Stage:
+##        try:
+##            loraRepo = './/models//diffusers//PixArtLora//pocketCreatures1024'
+##            PixArtStorage.pipeTR.transformer = PeftModel.from_pretrained(
+##                PixArtStorage.pipeTR.transformer,
+##                loraRepo
+##            )
+##        except:
+##            pass
+
     if is2Stage:
         refinerModel = model[:-1] + '2'
         if PixArtStorage.lastRefiner != refinerModel:
@@ -379,23 +425,6 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
     else:
         PixArtStorage.pipeTR.refiner = None
         PixArtStorage.lastRefiner = None
-
-
-    logging.set_verbosity(logging.WARN)
-            
-##    # LoRA model -can't find examples in necessary form
-#    loraLocation = ".//models//diffusers//PixArtLora//Wednesday.safetensors"
-#    loraName = "Wednesday"
-#    pipe.load_lora_weights (loraLocation, adapter_name="a1")
-
-#    pipe.transformer = PeftModel.from_pretrained(
-#        pipe.transformer,
-#        loraLocation,
-#        adapter_name=loraName,
-#        config=None,
-#        local_files_only=True
-#    )
-
 
     ##  load VAE only if changed - currently always loading, relatively small file; can switch between Alpha and Sigma
 
@@ -537,55 +566,56 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         num_steps = 1
         timesteps = [DMDstep]
 
-
-    #   need to load default scheduler each time, or check if changed
-    schedulerConfig = dict(PixArtStorage.pipeTR.scheduler.config)
-    schedulerConfig['use_karras_sigmas'] = PixArtStorage.karras
-    schedulerConfig.pop('algorithm_type', None) 
-
-    if isDMD or isLCM:
-        scheduler = 'default'
-
-    if isFlash:
-        # Scheduler
+    if isDMD:
+        PixArtStorage.pipeTR.scheduler = DDPMScheduler.from_pretrained(
+            "PixArt-alpha/PixArt-Alpha-DMD-XL-2-512x512",
+            subfolder="scheduler",
+        )
+    elif isLCM:
         PixArtStorage.pipeTR.scheduler = LCMScheduler.from_pretrained(
-            "PixArt-alpha/PixArt-XL-2-1024-MS",
+            "PixArt-alpha/PixArt-LCM-XL-2-1024-MS",
+            subfolder="scheduler",
+        )
+    elif isFlash:
+        PixArtStorage.pipeTR.scheduler = LCMScheduler.from_pretrained(
+            "PixArt-alpha/PixArt-LCM-XL-2-1024-MS",
             subfolder="scheduler",
             timestep_spacing="trailing",
         )
-    elif scheduler == 'DDPM':
-        PixArtStorage.pipeTR.scheduler = DDPMScheduler.from_config(schedulerConfig)
-    elif scheduler == 'DEIS':
-        PixArtStorage.pipeTR.scheduler = DEISMultistepScheduler.from_config(schedulerConfig)
-    elif scheduler == 'DPM++ 2M':
-        PixArtStorage.pipeTR.scheduler = DPMSolverMultistepScheduler.from_config(schedulerConfig)
-    elif scheduler == "DPM++ 2M SDE":
-        schedulerConfig['algorithm_type'] = 'sde-dpmsolver++'
-        PixArtStorage.pipeTR.scheduler = DPMSolverMultistepScheduler.from_config(schedulerConfig)
-    elif scheduler == 'DPM':
-        PixArtStorage.pipeTR.scheduler = DPMSolverSinglestepScheduler.from_config(schedulerConfig)
-    elif scheduler == 'DPM SDE':
-        PixArtStorage.pipeTR.scheduler = DPMSolverSDEScheduler.from_config(schedulerConfig)
-    elif scheduler == 'Euler':
-        PixArtStorage.pipeTR.scheduler = EulerDiscreteScheduler.from_config(schedulerConfig)
-    elif scheduler == 'Euler A':
-        PixArtStorage.pipeTR.scheduler = EulerAncestralDiscreteScheduler.from_config(schedulerConfig)
-    elif scheduler == 'LCM':
-        PixArtStorage.pipeTR.scheduler = LCMScheduler.from_config(schedulerConfig)
-    elif scheduler == "SA-solver":
-        schedulerConfig['algorithm_type'] = 'data_prediction'
-        PixArtStorage.pipeTR.scheduler = SASolverScheduler.from_config(schedulerConfig)
-    elif scheduler == 'UniPC':
-        PixArtStorage.pipeTR.scheduler = UniPCMultistepScheduler.from_config(schedulerConfig)
     else:
-        PixArtStorage.pipeTR.scheduler = DDPMScheduler.from_config(schedulerConfig)
-
-
-
+        schedulerConfig = dict(PixArtStorage.pipeTR.scheduler.config)
+        schedulerConfig['use_karras_sigmas'] = PixArtStorage.karras
+        schedulerConfig.pop('algorithm_type', None) 
         
+        if scheduler == 'DDPM':
+            PixArtStorage.pipeTR.scheduler = DDPMScheduler.from_config(schedulerConfig)
+        elif scheduler == 'DEIS':
+            PixArtStorage.pipeTR.scheduler = DEISMultistepScheduler.from_config(schedulerConfig)
+        elif scheduler == 'DPM++ 2M':
+            PixArtStorage.pipeTR.scheduler = DPMSolverMultistepScheduler.from_config(schedulerConfig)
+        elif scheduler == "DPM++ 2M SDE":
+            schedulerConfig['algorithm_type'] = 'sde-dpmsolver++'
+            PixArtStorage.pipeTR.scheduler = DPMSolverMultistepScheduler.from_config(schedulerConfig)
+        elif scheduler == 'DPM':
+            PixArtStorage.pipeTR.scheduler = DPMSolverSinglestepScheduler.from_config(schedulerConfig)
+        elif scheduler == 'DPM SDE':
+            PixArtStorage.pipeTR.scheduler = DPMSolverSDEScheduler.from_config(schedulerConfig)
+        elif scheduler == 'Euler':
+            PixArtStorage.pipeTR.scheduler = EulerDiscreteScheduler.from_config(schedulerConfig)
+        elif scheduler == 'Euler A':
+            PixArtStorage.pipeTR.scheduler = EulerAncestralDiscreteScheduler.from_config(schedulerConfig)
+        elif scheduler == 'LCM':
+            PixArtStorage.pipeTR.scheduler = LCMScheduler.from_config(schedulerConfig)
+        elif scheduler == "SA-solver":
+            schedulerConfig['algorithm_type'] = 'data_prediction'
+            PixArtStorage.pipeTR.scheduler = SASolverScheduler.from_config(schedulerConfig)
+        elif scheduler == 'UniPC':
+            PixArtStorage.pipeTR.scheduler = UniPCMultistepScheduler.from_config(schedulerConfig)
+        else:
+            PixArtStorage.pipeTR.scheduler = DDPMScheduler.from_config(schedulerConfig)
+
 #    if PixArtStorage.vpred == True:
 #        pipe.scheduler.config.prediction_type = 'v_prediction'
-
 
     with torch.inference_mode():
         output = PixArtStorage.pipeTR(
@@ -614,6 +644,10 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
             negative_prompt_attention_mask  = PixArtStorage.neg_attention,
             use_resolution_binning          = PixArtStorage.resolutionBin,
             timesteps                       = timesteps,
+            
+            pag_scale                       = PAG_scale,
+            pag_adaptive_scale              = PAG_adapt,
+            
             isSigma                         = isSigma,
             isDMD                           = isDMD,
             noUnload                        = PixArtStorage.noUnload,
@@ -646,6 +680,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
             model,
             positive_prompt, negative_prompt,
             guidance_scale, guidance_rescale, guidance_cutoff,
+            PAG_scale, PAG_adapt, 
             num_steps, DMDstep,
             fixed_seed + i, scheduler,
             width, height, useControlNet)
@@ -698,9 +733,6 @@ def on_ui_tabs():
     def reuseLastSeed ():
         return PixArtStorage.lastSeed + PixArtStorage.galleryIndex
         
-    def randomSeed ():
-        return -1
-
     def i2iSetDimensions (image, w, h):
         if image is not None:
             w = image.size[0]
@@ -761,10 +793,15 @@ def on_ui_tabs():
 
     def i2iImageFromGallery (gallery):
         try:
-            newImage = gallery[PixArtStorage.galleryIndex][0]['name'].split('?')
-            return newImage[0]
+            if PixArtStorage.usingGradio4:
+                newImage = gallery[PixArtStorage.galleryIndex][0]
+                return newImage
+            else:
+                newImage = gallery[PixArtStorage.galleryIndex][0]['name'].rsplit('?', 1)[0]
+                return newImage
         except:
             return None
+
     def toggleC2P ():
         PixArtStorage.captionToPrompt ^= True
         return gradio.Button.update(variant=['secondary', 'primary'][PixArtStorage.captionToPrompt])
@@ -854,7 +891,7 @@ def on_ui_tabs():
     schedulerList = ["default", "DDPM", "DEIS", "DPM++ 2M", "DPM++ 2M SDE", "DPM", "DPM SDE",
                      "Euler", "Euler A", "LCM", "SA-solver", "UniPC", ]
 
-    def parsePrompt (positive, negative, width, height, seed, scheduler, steps, cfg, guidance_rescale, guidance_cutoff, nr, ng, nb, ns):
+    def parsePrompt (positive, negative, width, height, seed, scheduler, steps, cfg, guidance_rescale, guidance_cutoff, PAG_scale, PAG_adapt, nr, ng, nb, ns):
         p = positive.split('\n')
         lineCount = len(p)
 
@@ -917,8 +954,8 @@ def on_ui_tabs():
                     match pairs[0]:
                         case "Size:":
                             size = pairs[1].split('x')
-                            width = int(size[0])
-                            height = int(size[1])
+                            width = 16 * ((int(size[0]) + 8) // 16)
+                            height = 16 * ((int(size[1]) + 8) // 16)
                         case "Seed:":
                             seed = int(pairs[1])
                         case "Sampler:":
@@ -942,11 +979,17 @@ def on_ui_tabs():
                             if len(pairs) == 4:
                                 guidance_rescale = float(pairs[2].strip('\(\)'))
                                 guidance_cutoff = float(pairs[3].strip('\[\]'))
+                            elif len(pairs) == 3:
+                                guidance_rescale = float(pairs[2].strip('\(\)'))
+                        case "PAG:":
+                            if len(pairs) == 3:
+                                PAG_scale = float(pairs[1])
+                                PAG_adapt = float(pairs[2].strip('\(\)'))
                         case "width:":
-                            width = float(pairs[1])
+                            width = 16 * ((int(pairs[1]) + 8) // 16)
                         case "height:":
-                            height = float(pairs[1])
-        return positive, negative, width, height, seed, scheduler, steps, cfg, guidance_rescale, guidance_cutoff, nr, ng, nb, ns
+                            height = 16 * ((int(pairs[1]) + 8) // 16)
+        return positive, negative, width, height, seed, scheduler, steps, cfg, guidance_rescale, guidance_cutoff, PAG_scale, PAG_adapt, nr, ng, nb, ns
 
 
     resolutionList256 = [
@@ -1006,8 +1049,8 @@ def on_ui_tabs():
         with ResizeHandleRow():
             with gradio.Column():
                 with gradio.Row():
-                    model = gradio.Dropdown(models_list, label='Model', value=defaultModel, type='value', scale=2)
                     access = ToolButton(value='\U0001F917', variant='secondary')
+                    model = gradio.Dropdown(models_list, label='Model', value=defaultModel, type='value', scale=2)
                     vae = gradio.Dropdown(["default", "consistency"], label='VAE', value='default', type='index', scale=1)
                     scheduler = gradio.Dropdown(schedulerList,
                         label='Sampler', value="UniPC", type='value', scale=1)
@@ -1015,12 +1058,12 @@ def on_ui_tabs():
 #                    vpred = ToolButton(value="\U0001D54D", variant='secondary', tooltip="use v-prediction")
 
                 with gradio.Row():
-                    positive_prompt = gradio.Textbox(label='Prompt', placeholder='Enter a prompt here...', default='', lines=2, show_label=False)
+                    positive_prompt = gradio.Textbox(label='Prompt', placeholder='Enter a prompt here...', lines=2, show_label=False)
                     parse = ToolButton(value="↙️", variant='secondary', tooltip="parse")
                     SP = ToolButton(value='ꌗ', variant='secondary', tooltip='zero out negative embeds')
 
                 with gradio.Row():
-                    negative_prompt = gradio.Textbox(label='Negative', placeholder='Negative prompt', default='', lines=1.01, show_label=False)
+                    negative_prompt = gradio.Textbox(label='Negative', placeholder='Negative prompt', lines=1.01, show_label=False)
                     style = gradio.Dropdown([x[0] for x in styles.styles_list], label='Style', value="[style] (None)", type='index', scale=0, show_label=False)
                 with gradio.Row():
                     width = gradio.Slider(label='Width', minimum=128, maximum=4096, step=16, value=defaultWidth, elem_id="PixArtSigma_width")
@@ -1033,9 +1076,12 @@ def on_ui_tabs():
                 with gradio.Row():
                     guidance_scale = gradio.Slider(label='CFG', minimum=1, maximum=8, step=0.1, value=4.0, scale=1, visible=True)
 #   add CFG for refiner?
-                    guidance_rescale = gradio.Slider(label='rescale CFG', minimum=0.00, maximum=1.0, step=0.01, value=0.0, precision=0.01, scale=1)
-                    guidance_cutoff = gradio.Slider(label='CFG cutoff after step', minimum=0.00, maximum=1.0, step=0.01, value=1.0, precision=0.01, scale=1)
+                    guidance_rescale = gradio.Slider(label='rescale CFG', minimum=0.00, maximum=1.0, step=0.01, value=0.0, scale=1)
+                    guidance_cutoff = gradio.Slider(label='CFG cutoff after step', minimum=0.00, maximum=1.0, step=0.01, value=1.0, scale=1)
                     DMDstep = gradio.Slider(label='Timestep for DMD', minimum=1, maximum=999, step=1, value=400, scale=2, visible=False)
+                with gradio.Row():
+                    PAG_scale = gradio.Slider(label='Perturbed-Attention Guidance scale', minimum=0, maximum=8, step=0.1, value=0.0, scale=1, visible=True)
+                    PAG_adapt = gradio.Slider(label='PAG adaptive scale', minimum=0.00, maximum=0.1, step=0.001, value=0.0, scale=1)
                 with gradio.Row():
                     steps = gradio.Slider(label='Steps', minimum=1, maximum=60, step=1, value=20, scale=2, visible=True)
                     sampling_seed = gradio.Number(label='Seed', value=-1, precision=0, scale=1)
@@ -1064,7 +1110,10 @@ def on_ui_tabs():
                 with gradio.Accordion(label='image to image', open=False):
                     with gradio.Row():
                         i2iSource = gradio.Image(label='image to image source', sources=['upload'], type='pil', interactive=True, show_download_button=False)
-                        maskSource = gradio.Image(label='source mask', sources=['upload'], type='pil', interactive=True, show_download_button=False, tool='sketch', image_mode='RGB', brush_color='#F0F0F0')#opts.img2img_inpaint_mask_brush_color)
+                        if PixArtStorage.usingGradio4:
+                            maskSource = gradio.ImageMask(label='mask source', sources=['upload'], type='pil', interactive=True, show_download_button=False, layers=False, brush=gradio.Brush(colors=["#F0F0F0"], default_color="#F0F0F0", color_mode='fixed'))
+                        else:
+                            maskSource = gradio.Image(label='mask source', sources=['upload'], type='pil', interactive=True, show_download_button=False, tool='sketch', image_mode='RGB', brush_color='#F0F0F0')#opts.img2img_inpaint_mask_brush_color)
                     with gradio.Row():
                         with gradio.Column():
                             with gradio.Row():
@@ -1078,22 +1127,22 @@ def on_ui_tabs():
                                 toPrompt = ToolButton(value='P', variant='secondary')
 
                         with gradio.Column():
-                            maskType = gradio.Dropdown(['none', 'image', 'drawn'], value='none', label='Mask', type='index')
-                            maskCut = gradio.Slider(label='Ignore Mask after step', minimum=0.00, maximum=1.0, step=0.01, value=1.0)
+                            maskType = gradio.Dropdown(['none', 'image', 'drawn', 'composite'], value='none', label='Mask', type='index')
                             maskBlur = gradio.Slider(label='Blur mask radius', minimum=0, maximum=25, step=1, value=0)
+                            maskCut = gradio.Slider(label='Ignore Mask after step', minimum=0.00, maximum=1.0, step=0.01, value=1.0)
                             maskCopy = gradio.Button(value='use i2i source as template')
 
                 with gradio.Row():
                     noUnload = gradio.Button(value='keep models loaded', variant='primary' if PixArtStorage.noUnload else 'secondary', tooltip='noUnload', scale=1)
                     unloadModels = gradio.Button(value='unload models', tooltip='force unload of models', scale=1)
 
-                ctrls = [positive_prompt, negative_prompt, model, vae, width, height, guidance_scale, guidance_rescale, guidance_cutoff, steps, DMDstep, sampling_seed, batch_size, scheduler, i2iSource, i2iDenoise, maskType, maskSource, maskBlur, maskCut, style, CNSource, CNMethod, CNStrength, CNStart, CNEnd]
+                ctrls = [positive_prompt, negative_prompt, model, vae, width, height, guidance_scale, guidance_rescale, guidance_cutoff, steps, DMDstep, sampling_seed, batch_size, scheduler, i2iSource, i2iDenoise, maskType, maskSource, maskBlur, maskCut, style, CNSource, CNMethod, CNStrength, CNStart, CNEnd, PAG_scale, PAG_adapt]
                 
-                parseCtrls = [positive_prompt, negative_prompt, width, height, sampling_seed, scheduler, steps, guidance_scale, guidance_rescale, guidance_cutoff, initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA]
+                parseCtrls = [positive_prompt, negative_prompt, width, height, sampling_seed, scheduler, steps, guidance_scale, guidance_rescale, guidance_cutoff, PAG_scale, PAG_adapt, initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA]
 
             with gradio.Column():
                 generate_button = gradio.Button(value="Generate", variant='primary', visible=True)
-                output_gallery = gradio.Gallery(label='Output', height="80vh",
+                output_gallery = gradio.Gallery(label='Output', height="80vh", type='pil', interactive=False, 
                                             show_label=False, object_fit='contain', visible=True, columns=1, preview=True)
 #   gallery movement buttons don't work, others do
 #   caption not displaying linebreaks, alt text does
@@ -1154,8 +1203,8 @@ def on_ui_tabs():
         access.click(toggleAccess, inputs=[], outputs=access)
         karras.click(toggleKarras, inputs=[], outputs=karras)
         resBin.click(toggleResBin, inputs=[], outputs=resBin)
-        swapper.click(fn=None, _js="function(){switchWidthHeight('PixArtSigma')}", inputs=None, outputs=None, show_progress=False)
-        random.click(randomSeed, inputs=[], outputs=sampling_seed, show_progress=False)
+        swapper.click(lambda w, h: (h, w), inputs=[width, height], outputs=[width, height], show_progress=False)
+        random.click(lambda : -1, inputs=[], outputs=sampling_seed, show_progress=False)
         reuseSeed.click(reuseLastSeed, inputs=[], outputs=sampling_seed, show_progress=False)
         AS.click(toggleAS, inputs=[], outputs=AS)
 
@@ -1166,10 +1215,10 @@ def on_ui_tabs():
 
         output_gallery.select (fn=getGalleryIndex, inputs=[], outputs=[])
 
-        generate_button.click(predict, inputs=ctrls, outputs=[generate_button, SP, output_gallery])
+        generate_button.click(predict, inputs=ctrls, outputs=[generate_button, SP, output_gallery]).then(fn=lambda: gradio.update(value='Generate', variant='primary', interactive=True), inputs=None, outputs=generate_button)
         generate_button.click(toggleGenerate, inputs=[initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA], outputs=[generate_button, SP])
 
-    return [(pixartsigma2_block, "PixArtSigma", "pixart_sigma")]
+    return [(pixartsigma2_block, "PixArtSigma", "pixart_sigma_DoE")]
 
 script_callbacks.on_ui_tabs(on_ui_tabs)
 

@@ -21,7 +21,7 @@ import urllib.parse as ul
 from typing import Callable, List, Optional, Tuple, Union
 
 import torch
-from transformers import T5EncoderModel, T5Tokenizer
+from transformers import T5EncoderModel, T5TokenizerFast
 
 from diffusers.image_processor import PipelineImageInput, VaeImageProcessor, PixArtImageProcessor
 from diffusers.models import AutoencoderKL, PixArtTransformer2DModel
@@ -35,6 +35,8 @@ from diffusers.utils import (
 )
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
+from diffusers.pipelines.pag.pag_utils import PAGMixin
+
 from scripts.controlnet_pixart import PixArtControlNetAdapterModel, PixArtControlNetTransformerModel
 
 
@@ -240,7 +242,7 @@ def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
 
 #from diffusers.loaders import FromSingleFileMixin, SD3LoraLoaderMixin #maybe PAGMixin
 
-class PixArtPipeline_DoE_combined(DiffusionPipeline):
+class PixArtPipeline_DoE_combined(DiffusionPipeline, PAGMixin):
 
     bad_punct_regex = re.compile(
         r"["
@@ -263,13 +265,14 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):
 
     def __init__(
         self,
-        tokenizer: T5Tokenizer,
+        tokenizer: T5TokenizerFast,
         text_encoder: T5EncoderModel,
         vae: AutoencoderKL,
         transformer: PixArtTransformer2DModel,
         scheduler: DPMSolverMultistepScheduler,
         refiner: Optional[PixArtTransformer2DModel] = None,
         controlnet: Optional[PixArtControlNetAdapterModel] = None,
+        pag_applied_layers: Union[str, List[str]] = ["blocks.14"],  # 1st transformer block
     ):
         super().__init__()
         
@@ -290,59 +293,121 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):
         self.image_processor = PixArtImageProcessor(vae_scale_factor=self.vae_scale_factor)
         self.mask_processor  = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor, vae_latent_channels=self.latent_channels, 
                                                  do_resize=False, do_normalize=False, do_binarize=False, do_convert_grayscale=True)
-    # Adapted from diffusers.pipelines.deepfloyd_if.pipeline_if.encode_prompt
+        self.set_pag_applied_layers(pag_applied_layers)
+
+    # Modified from diffusers.pipelines.deepfloyd_if.pipeline_if.encode_prompt
     def encode_prompt(
         self,
         prompt: str = "",
         negative_prompt: str = "",
         device: Optional[torch.device] = None,
-        clean_caption: bool = False,
-        max_sequence_length: int = 300, #120 for Alpha, but why limit?
+        isSigma: bool = True,
         **kwargs,
     ):
 
         if device is None:
             device = self._execution_device
 
-        # See Section 3.1. of the paper.
-        max_length = max_sequence_length
+        max_length = 300 if isSigma else 120
+        
+        def prompt_and_weights (tokenizer, prompt):
+            prompt = self._text_preprocessing(prompt)
+            promptSplit = prompt[0].split(' ')
+            cleanedPrompt = ' '.join((t.split(':')[0] for t in promptSplit))
+            weights = []
 
-        # positive
-        prompt = self._text_preprocessing(prompt, clean_caption=clean_caption)
+            for t in promptSplit:
+                t = t.split(':')
+                if len(t) == 1:
+                    weight = 1.0
+                elif t[1] == '':
+                    weight = 1.0
+                else:
+                    weight = float(t[1])
+
+                text_inputsX = tokenizer(
+                    t[0],
+                    padding=False,
+                    max_length=max_length,
+                    truncation=True,
+                    return_attention_mask=False,
+                    add_special_tokens=False,
+                    return_tensors="pt",
+                )
+
+                tokenLength = len(text_inputsX.input_ids[0])
+                for w in range(tokenLength):
+                    weights.append(weight)
+            
+            return cleanedPrompt, weights
+
+        positive_prompt, positive_weights = prompt_and_weights(self.tokenizer, prompt)
+        negative_prompt, negative_weights = prompt_and_weights(self.tokenizer, negative_prompt)
+
         text_inputs = self.tokenizer(
-            prompt,
-            padding="max_length",
-            max_length=max_length,
-            truncation=True,
-            add_special_tokens=True,
-            return_tensors="pt",
-        )
-        text_input_ids = text_inputs.input_ids
-
-        prompt_attention_mask = text_inputs.attention_mask
-
-        prompt_embeds = self.text_encoder(text_input_ids.to(device), attention_mask=prompt_attention_mask.to(device))
-        prompt_embeds = prompt_embeds[0]
-
-        # negative - unconditional embeddings for classifier free guidance
-        negative_prompt = self._text_preprocessing(negative_prompt, clean_caption=clean_caption)
-        max_length = prompt_embeds.shape[1]
-        uncond_input = self.tokenizer(
-            negative_prompt,
-            padding="max_length",
+            [positive_prompt] + [negative_prompt],
+            padding=True,
             max_length=max_length,
             truncation=True,
             return_attention_mask=True,
             add_special_tokens=True,
             return_tensors="pt",
         )
-        negative_prompt_attention_mask = uncond_input.attention_mask
+        positive_attention = text_inputs.attention_mask[0:1]
+        negative_attention = text_inputs.attention_mask[1:]
 
-        negative_prompt_embeds = self.text_encoder(
-            uncond_input.input_ids.to(device), attention_mask=negative_prompt_attention_mask.to(device))
-        negative_prompt_embeds = negative_prompt_embeds[0]
+        prompt_embeds = self.text_encoder(text_inputs.input_ids.to(device), attention_mask=text_inputs.attention_mask.to(device))
 
-        return prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask
+        max_tokens = min (len(positive_weights), len(prompt_embeds[0][0]))
+        positive_mean_before = prompt_embeds[0][0].mean()
+        for p in range(max_tokens):
+            prompt_embeds[0][0][p] *= positive_weights[p]
+        positive_mean_after = prompt_embeds[0][0].mean()
+        prompt_embeds[0][0] *= positive_mean_before / positive_mean_after
+            
+        max_tokens = min (len(negative_weights), len(prompt_embeds[0][1]))      #   should be same
+        negative_mean_before = prompt_embeds[0][1].mean()
+        for p in range(max_tokens):
+            prompt_embeds[0][1][p] *= negative_weights[p]
+        negative_mean_after = prompt_embeds[0][1].mean()
+        prompt_embeds[0][1] *= negative_mean_before / negative_mean_after
+
+        positive_prompt_embeds = prompt_embeds[0][0].unsqueeze(0)
+        negative_prompt_embeds = prompt_embeds[0][1].unsqueeze(0)
+
+        # prompt = self._text_preprocessing(prompt)
+        # text_inputs = self.tokenizer(
+            # prompt,
+            # padding="max_length",
+            # max_length=max_length,
+            # truncation=True,
+            # add_special_tokens=True,
+            # return_tensors="pt",
+        # )
+        # text_input_ids = text_inputs.input_ids
+        # positive_attention = text_inputs.attention_mask
+        # positive_attention = positive_attention.to(device)
+
+        # prompt_embeds = self.text_encoder(text_input_ids.to(device), attention_mask=positive_attention)
+        # positive_prompt_embeds = prompt_embeds[0]
+
+        # prompt = self._text_preprocessing(negative_prompt)
+        # text_inputs = self.tokenizer(
+            # prompt,
+            # padding="max_length",
+            # max_length=max_length,
+            # truncation=True,
+            # add_special_tokens=True,
+            # return_tensors="pt",
+        # )
+        # text_input_ids = text_inputs.input_ids
+        # negative_attention = text_inputs.attention_mask
+        # negative_attention = negative_attention.to(device)
+
+        # prompt_embeds = self.text_encoder(text_input_ids.to(device), attention_mask=negative_attention)
+        # negative_prompt_embeds = prompt_embeds[0]
+
+        return positive_prompt_embeds, positive_attention, negative_prompt_embeds, negative_attention
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.prepare_extra_step_kwargs
     def prepare_extra_step_kwargs(self, generator, eta):
@@ -376,144 +441,16 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):
 
 
     # Copied from diffusers.pipelines.deepfloyd_if.pipeline_if.IFPipeline._text_preprocessing
-    def _text_preprocessing(self, text, clean_caption=False):
-        if clean_caption and not is_bs4_available():
-            logger.warning(BACKENDS_MAPPING["bs4"][-1].format("Setting `clean_caption=True`"))
-            logger.warning("Setting `clean_caption` to False...")
-            clean_caption = False
-
-        if clean_caption and not is_ftfy_available():
-            logger.warning(BACKENDS_MAPPING["ftfy"][-1].format("Setting `clean_caption=True`"))
-            logger.warning("Setting `clean_caption` to False...")
-            clean_caption = False
-
+    def _text_preprocessing(self, text):
         if not isinstance(text, (tuple, list)):
             text = [text]
 
         def process(text: str):
-            if clean_caption:
-                text = self._clean_caption(text)
-                text = self._clean_caption(text)
-            else:
-                text = text.lower().strip()
+            text = text.lower().strip()
             return text
 
         return [process(t) for t in text]
 
-    # Copied from diffusers.pipelines.deepfloyd_if.pipeline_if.IFPipeline._clean_caption
-    def _clean_caption(self, caption):
-        caption = str(caption)
-        caption = ul.unquote_plus(caption)
-        caption = caption.strip().lower()
-        caption = re.sub("<person>", "person", caption)
-        # urls:
-        caption = re.sub(
-            r"\b((?:https?:(?:\/{1,3}|[a-zA-Z0-9%])|[a-zA-Z0-9.\-]+[.](?:com|co|ru|net|org|edu|gov|it)[\w/-]*\b\/?(?!@)))",  # noqa
-            "",
-            caption,
-        )  # regex for urls
-        caption = re.sub(
-            r"\b((?:www:(?:\/{1,3}|[a-zA-Z0-9%])|[a-zA-Z0-9.\-]+[.](?:com|co|ru|net|org|edu|gov|it)[\w/-]*\b\/?(?!@)))",  # noqa
-            "",
-            caption,
-        )  # regex for urls
-        # html:
-        caption = BeautifulSoup(caption, features="html.parser").text
-
-        # @<nickname>
-        caption = re.sub(r"@[\w\d]+\b", "", caption)
-
-        # 31C0—31EF CJK Strokes
-        # 31F0—31FF Katakana Phonetic Extensions
-        # 3200—32FF Enclosed CJK Letters and Months
-        # 3300—33FF CJK Compatibility
-        # 3400—4DBF CJK Unified Ideographs Extension A
-        # 4DC0—4DFF Yijing Hexagram Symbols
-        # 4E00—9FFF CJK Unified Ideographs
-        caption = re.sub(r"[\u31c0-\u31ef]+", "", caption)
-        caption = re.sub(r"[\u31f0-\u31ff]+", "", caption)
-        caption = re.sub(r"[\u3200-\u32ff]+", "", caption)
-        caption = re.sub(r"[\u3300-\u33ff]+", "", caption)
-        caption = re.sub(r"[\u3400-\u4dbf]+", "", caption)
-        caption = re.sub(r"[\u4dc0-\u4dff]+", "", caption)
-        caption = re.sub(r"[\u4e00-\u9fff]+", "", caption)
-        #######################################################
-
-        # все виды тире / all types of dash --> "-"
-        caption = re.sub(
-            r"[\u002D\u058A\u05BE\u1400\u1806\u2010-\u2015\u2E17\u2E1A\u2E3A\u2E3B\u2E40\u301C\u3030\u30A0\uFE31\uFE32\uFE58\uFE63\uFF0D]+",  # noqa
-            "-",
-            caption,
-        )
-
-        # кавычки к одному стандарту
-        caption = re.sub(r"[`´«»“”¨]", '"', caption)
-        caption = re.sub(r"[‘’]", "'", caption)
-
-        # &quot;
-        caption = re.sub(r"&quot;?", "", caption)
-        # &amp
-        caption = re.sub(r"&amp", "", caption)
-
-        # ip adresses:
-        caption = re.sub(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", " ", caption)
-
-        # article ids:
-        caption = re.sub(r"\d:\d\d\s+$", "", caption)
-
-        # \n
-        caption = re.sub(r"\\n", " ", caption)
-
-        # "#123"
-        caption = re.sub(r"#\d{1,3}\b", "", caption)
-        # "#12345.."
-        caption = re.sub(r"#\d{5,}\b", "", caption)
-        # "123456.."
-        caption = re.sub(r"\b\d{6,}\b", "", caption)
-        # filenames:
-        caption = re.sub(r"[\S]+\.(?:png|jpg|jpeg|bmp|webp|eps|pdf|apk|mp4)", "", caption)
-
-        #
-        caption = re.sub(r"[\"\']{2,}", r'"', caption)  # """AUSVERKAUFT"""
-        caption = re.sub(r"[\.]{2,}", r" ", caption)  # """AUSVERKAUFT"""
-
-        caption = re.sub(self.bad_punct_regex, r" ", caption)  # ***AUSVERKAUFT***, #AUSVERKAUFT
-        caption = re.sub(r"\s+\.\s+", r" ", caption)  # " . "
-
-        # this-is-my-cute-cat / this_is_my_cute_cat
-        regex2 = re.compile(r"(?:\-|\_)")
-        if len(re.findall(regex2, caption)) > 3:
-            caption = re.sub(regex2, " ", caption)
-
-        caption = ftfy.fix_text(caption)
-        caption = html.unescape(html.unescape(caption))
-
-        caption = re.sub(r"\b[a-zA-Z]{1,3}\d{3,15}\b", "", caption)  # jc6640
-        caption = re.sub(r"\b[a-zA-Z]+\d+[a-zA-Z]+\b", "", caption)  # jc6640vc
-        caption = re.sub(r"\b\d+[a-zA-Z]+\d+\b", "", caption)  # 6640vc231
-
-        caption = re.sub(r"(worldwide\s+)?(free\s+)?shipping", "", caption)
-        caption = re.sub(r"(free\s)?download(\sfree)?", "", caption)
-        caption = re.sub(r"\bclick\b\s(?:for|on)\s\w+", "", caption)
-        caption = re.sub(r"\b(?:png|jpg|jpeg|bmp|webp|eps|pdf|apk|mp4)(\simage[s]?)?", "", caption)
-        caption = re.sub(r"\bpage\s+\d+\b", "", caption)
-
-        caption = re.sub(r"\b\d*[a-zA-Z]+\d+[a-zA-Z]+\d+[a-zA-Z\d]*\b", r" ", caption)  # j2d1a2a...
-
-        caption = re.sub(r"\b\d+\.?\d*[xх×]\d+\.?\d*\b", "", caption)
-
-        caption = re.sub(r"\b\s+\:\s+", r": ", caption)
-        caption = re.sub(r"(\D[,\./])\b", r"\1 ", caption)
-        caption = re.sub(r"\s+", " ", caption)
-
-        caption.strip()
-
-        caption = re.sub(r"^[\"\']([\w\W]+)[\"\']$", r"\1", caption)
-        caption = re.sub(r"^[\'\_,\-\:;]", r"", caption)
-        caption = re.sub(r"[\'\_,\-\:\-\+]$", r"", caption)
-        caption = re.sub(r"^\.\S+$", "", caption)
-
-        return caption.strip()
 
     @torch.no_grad()
     def __call__(
@@ -536,9 +473,7 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):
         negative_prompt_attention_mask: Optional[torch.Tensor] = None,
         callback: Optional[Callable[[int, int, torch.Tensor], None]] = None,
         callback_steps: int = 1,
-        clean_caption: bool = True,
         use_resolution_binning: bool = True,
-        max_sequence_length: int = 300, #Alpha was 120
         isSigma: bool = True,
         isDMD: bool = False,
         
@@ -551,12 +486,17 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):
         control_guidance_start: float = 0.0,
         control_guidance_end: float = 1.0,
 
+        pag_scale: float = 3.0,
+        pag_adaptive_scale: float = 0.0,
+
         noUnload: Optional[bool] = False,
 
         **kwargs,
     ) -> torch.Tensor:
 
         doDiffDiff = True if (image and mask_image) else False
+        self._pag_scale = pag_scale
+        self._pag_adaptive_scale = pag_adaptive_scale
 
         # 0.01 repeat prompt embeds to match num_images_per_prompt
         prompt_embeds = prompt_embeds.repeat(num_images_per_prompt, 1, 1)
@@ -592,9 +532,22 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):
         do_classifier_free_guidance = guidance_scale > 1.0
 
         # 3. Encode input prompt - already done
-        if do_classifier_free_guidance:
+        if self.do_perturbed_attention_guidance:
+            prompt_embeds = self._prepare_perturbed_attention_guidance(
+                prompt_embeds, negative_prompt_embeds, do_classifier_free_guidance
+            )
+            prompt_attention_mask = self._prepare_perturbed_attention_guidance(
+                prompt_attention_mask, negative_prompt_attention_mask, do_classifier_free_guidance
+            )
+        elif do_classifier_free_guidance:
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
             prompt_attention_mask = torch.cat([negative_prompt_attention_mask, prompt_attention_mask], dim=0)
+
+        components_multipler = 1
+        if self.do_perturbed_attention_guidance:
+            components_multipler += 1
+        if do_classifier_free_guidance:
+            components_multipler += 1
 
         # 4. Prepare timesteps
         timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps, sigmas)
@@ -629,8 +582,9 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):
             control_latents = self.vae.encode(control_image).latent_dist.sample() * self.vae.config.scaling_factor
             del control_image
             control_latents = control_latents.repeat(num_images_per_prompt, 1, 1, 1)
-            if do_classifier_free_guidance:
-                control_latents = torch.cat([control_latents] * 2)
+            if components_multipler > 1:
+                control_latents = torch.cat([control_latents] * components_multipler)
+
             # change to the controlnet transformer model
             self.transformer = PixArtControlNetTransformerModel(
                 transformer=self.transformer,
@@ -638,6 +592,14 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):
             ).to('cuda')
         else:
             control_latents = None
+
+        if self.do_perturbed_attention_guidance:
+            original_attn_proc = self.transformer.attn_processors
+            self._set_pag_attn_processor(
+                pag_applied_layers=self.pag_applied_layers,
+                do_classifier_free_guidance=do_classifier_free_guidance,
+            )
+
 
         # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
@@ -650,9 +612,9 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):
             resolution = resolution.to(dtype=prompt_embeds.dtype, device=device)
             aspect_ratio = aspect_ratio.to(dtype=prompt_embeds.dtype, device=device)
 
-            if do_classifier_free_guidance:
-                resolution = torch.cat([resolution, resolution], dim=0)
-                aspect_ratio = torch.cat([aspect_ratio, aspect_ratio], dim=0)
+            if components_multipler > 1:
+                resolution = torch.cat([resolution] * components_multipler, dim=0)
+                aspect_ratio = torch.cat([aspect_ratio] * components_multipler, dim=0)
 
             added_cond_kwargs = {"resolution": resolution, "aspect_ratio": aspect_ratio}
 
@@ -670,19 +632,22 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):
                     init_latents_proper = self.scheduler.add_noise(image_latents, noise, ts)
                     latents = (init_latents_proper * ~tmask) + (latents * tmask)
 
-                if float((i+1) / num_timesteps) > guidance_cutoff and guidance_scale != 1.0:
+                if float((i+1) / num_timesteps) > guidance_cutoff and guidance_scale != 1.0 and PAG_scale == 0.0:
                     do_classifier_free_guidance = False
                     guidance_scale = 1.0
-                    prompt_embeds = prompt_embeds[num_images_per_prompt:]
-                    prompt_attention_mask = prompt_attention_mask[num_images_per_prompt:]
+                    components_multipler -= 1
+                    
+                    prompt_embeds = prompt_embeds[components_multipler * num_images_per_prompt:]
+                    prompt_attention_mask = prompt_attention_mask[components_multipler * num_images_per_prompt:]
                     if not isSigma and self.transformer.config.sample_size == 128:
-                        resolution = resolution[num_images_per_prompt:]
-                        aspect_ratio = aspect_ratio[num_images_per_prompt:]
+                        resolution = resolution[components_multipler * num_images_per_prompt:]
+                        aspect_ratio = aspect_ratio[components_multipler * num_images_per_prompt:]
                         added_cond_kwargs = {"resolution": resolution, "aspect_ratio": aspect_ratio}
                     if control_latents is not None:
-                        control_latents = control_latents[num_images_per_prompt:]
+                        control_latents = control_latents[components_multipler * num_images_per_prompt:]
 
-                latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+
+                latent_model_input = torch.cat([latents] * components_multipler, dim=0)
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
                 current_timestep = t
@@ -741,8 +706,12 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):
 #   if noUnload: manually move transformer /refiner between cpu/gpu ?
 #   don't need the VRAM?
 
-                # perform guidance
-                if do_classifier_free_guidance:
+                #   perform guidance
+                if self.do_perturbed_attention_guidance:
+                    noise_pred = self._apply_perturbed_attention_guidance(
+                        noise_pred, do_classifier_free_guidance, guidance_scale, t
+                    )
+                elif do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
                     if guidance_rescale > 0.0:
@@ -774,6 +743,9 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline):
         if control_latents is not None:
             del control_latents
             self.transformer = self.transformer.transformer     #   undo controlnet change
+
+        if self.do_perturbed_attention_guidance:
+            self.transformer.set_attn_processor(original_attn_proc)
 
         # Offload all models
         self.maybe_free_model_hooks()

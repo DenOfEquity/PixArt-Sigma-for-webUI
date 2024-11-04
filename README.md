@@ -1,6 +1,8 @@
 ## PixArt Sigma (and Alpha) for webui ##
-### Forge tested, probably A1111 too ###
+### Forge (new and old) tested, A1111 too ###
 I don't think there is anything Forge specific here.
+
+
 ### works for me <sup>TM</sup> on 8GB VRAM, 16GB RAM (GTX1070) ###
 
 ---
@@ -10,12 +12,15 @@ Go to the **Extensions** tab, then **Install from URL**, use the URL for this re
 
 Easiest way to ensure necessary versions are installed is to edit `requirements_versions.txt` in the webUI folder.
 ```
-diffusers>=0.29.2
+diffusers>=0.30.0
 tokenizers>=0.19
 transformers>=4.40
 peft
 ```
 These upgrades didn't break anything for me.
+
+Forge2 already has newer versions of tokenizers and transformers. Be aware that updates to Forge2 may overwrite the requirements file.
+
 
 ---
 ### downloads models on demand - minimum will be ~20GB ###
@@ -44,6 +49,11 @@ I can generate using all models, though the 2K Sigma model is very slow on my li
 ---
 <details>
 <summary>Change log</summary>
+
+#### 22/08/2024 ####
+* added Perturbed-attention guidance. It's not compatible with CFG cutoff. Using PAG therefore forces CFG cutoff to 1.0 (i.e. no cutoff). Needs diffusers >= 0.30.0
+* minor UI tweaks to work better in Forge2
+* adjustments for gradio4
 
 #### 27/07/2024 ####
 * added drawing of masks for image to image. Load/copy the source image into the mask, to use as a template.

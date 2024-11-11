@@ -743,7 +743,8 @@ def on_ui_tabs():
         if not str(filename).endswith("modeling_florence2.py"):
             return get_imports(filename)
         imports = get_imports(filename)
-        imports.remove("flash_attn")
+        if "flash_attn" in imports:
+            imports.remove("flash_attn")
         return imports
     def i2iMakeCaptions (image, originalPrompt):
         if image == None:
@@ -753,11 +754,9 @@ def on_ui_tabs():
             model = AutoModelForCausalLM.from_pretrained('microsoft/Florence-2-base', 
                                                          attn_implementation="sdpa", 
                                                          torch_dtype=torch.float16, 
-                                                         cache_dir=".//models//diffusers//", 
                                                          trust_remote_code=True).to('cuda')
         processor = AutoProcessor.from_pretrained('microsoft/Florence-2-base', #-large
                                                   torch_dtype=torch.float32, 
-                                                  cache_dir=".//models//diffusers//", 
                                                   trust_remote_code=True)
 
         result = ''

@@ -103,7 +103,7 @@ def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, gui
     prompt_text = f"Prompt: {positive_prompt}\n"
     if negative_prompt != "":
         prompt_text += (f"Negative: {negative_prompt}\n")
-    generation_params_text = ", ".join([k if k == v else f'{k}: {v}' for k, v in generation_params.items() if v is not None])
+    generation_params_text = "Parameters: " + ", ".join([k if k == v else f'{k}: {v}' for k, v in generation_params.items() if v is not None])
     noise_text = f"\nInitial noise: {PixArtStorage.noiseRGBA}" if PixArtStorage.noiseRGBA[3] != 0.0 else ""
 
     return f"Model: {model}\n{prompt_text}{generation_params_text}{noise_text}"
@@ -259,7 +259,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
             ##  fetch the T5 model, ~20gigs, load as fp16
             PixArtStorage.pipeTE.text_encoder = T5EncoderModel.from_pretrained(
                 "PixArt-alpha/pixart_sigma_sdxlvae_T5_diffusers",
-                local_files_only=False, cache_dir=".//models//diffusers//",
+                local_files_only=False,
                 subfolder="text_encoder",
                 low_cpu_mem_usage=True,                
                 torch_dtype=torch.float16,
@@ -371,7 +371,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 #        custom = ".//models//diffusers//PixArtCustom//" + model
 #        pipe.transformer = Transformer2DModel.from_single_file(
 #            custom,
-#            local_files_only=False, cache_dir=".//models//diffusers//",
+#            local_files_only=False,
 #            use_safetensors=True,
 #            torch_dtype=torch.float16,
 #            subfolder="transformer",
@@ -381,7 +381,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
             try:
                 PixArtStorage.pipeTR.transformer = PixArtTransformer2DModel.from_pretrained(
                     model,
-                    local_files_only=False, cache_dir=".//models//diffusers//",
+                    local_files_only=False,
                     low_cpu_mem_usage=True,                
                     subfolder='transformer',
                     torch_dtype=torch.float16,
@@ -415,7 +415,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         if PixArtStorage.lastRefiner != refinerModel:
             PixArtStorage.pipeTR.refiner = PixArtTransformer2DModel.from_pretrained(
                 refinerModel,
-                local_files_only=False, cache_dir=".//models//diffusers//",
+                local_files_only=False,
                 low_cpu_mem_usage=True,                
                 subfolder='transformer',
                 torch_dtype=torch.float16,
@@ -432,7 +432,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
     if useConsistencyVAE:   #   option for Alpha models
         PixArtStorage.pipeTR.vae = ConsistencyDecoderVAE.from_pretrained(
             "openai/consistency-decoder",
-            local_files_only=False, cache_dir=".//models//diffusers//",
+            local_files_only=False,
             torch_dtype=torch.float16)
     else:    
         cachedVAE = ".//models//diffusers//pixart_T5_fp16//vaeSigma" if isSigma else ".//models//diffusers//pixart_T5_fp16//vaeAlpha"
@@ -443,7 +443,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         except:
             PixArtStorage.pipeTR.vae = AutoencoderKL.from_pretrained(
                 sourceVAE,
-                local_files_only=False, cache_dir=".//models//diffusers//",
+                local_files_only=False,
                 subfolder="vae",
                 use_safetensors=True,
                 torch_dtype=torch.float16, )
@@ -464,7 +464,6 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         if useControlNet != PixArtStorage.loadedControlNet:
             PixArtStorage.pipeTR.controlnet=controlnet.PixArtControlNetAdapterModel.from_pretrained(
                 useControlNet,
-                cache_dir=".//models//diffusers//",
                 use_safetensors=True,
                 torch_dtype=torch.float16
             )
@@ -727,8 +726,9 @@ def on_ui_tabs():
     defaultWidth = models.defaultWidth
     defaultHeight = models.defaultHeight
     
-    def getGalleryIndex (evt: gradio.SelectData):
+    def getGalleryIndex (evt: gradio.SelectData, gallery):
         PixArtStorage.galleryIndex = evt.index
+        return gallery[PixArtStorage.galleryIndex][1]
 
     def reuseLastSeed ():
         return PixArtStorage.lastSeed + PixArtStorage.galleryIndex
@@ -854,13 +854,11 @@ def on_ui_tabs():
         if tokenizer is None:
             tokenizer = T5TokenizerFast.from_pretrained(
                 'roborovski/superprompt-v1',
-                cache_dir='.//models//diffusers//',
             )
             shared.SuperPrompt_tokenizer = tokenizer
         if superprompt is None:
             superprompt = T5ForConditionalGeneration.from_pretrained(
                 'roborovski/superprompt-v1',
-                cache_dir='.//models//diffusers//',
                 device_map='auto',
                 torch_dtype=torch.float16
             )
@@ -1143,6 +1141,8 @@ def on_ui_tabs():
                 generate_button = gradio.Button(value="Generate", variant='primary', visible=True)
                 output_gallery = gradio.Gallery(label='Output', height="80vh", type='pil', interactive=False, 
                                             show_label=False, object_fit='contain', visible=True, columns=1, preview=True)
+                image_infotext = gradio.Textbox(visible=False)
+
 #   gallery movement buttons don't work, others do
 #   caption not displaying linebreaks, alt text does
 
@@ -1152,7 +1152,7 @@ def on_ui_tabs():
                 for tabname, button in buttons.items():
                     parameters_copypaste.register_paste_params_button(parameters_copypaste.ParamBinding(
                         paste_button=button, tabname=tabname,
-                        source_text_component=positive_prompt,
+                        source_text_component=image_infotext,#positive_prompt,
                         source_image_component=output_gallery,
                     ))
 
@@ -1209,10 +1209,10 @@ def on_ui_tabs():
 
         i2iSetWH.click (fn=i2iSetDimensions, inputs=[i2iSource, width, height], outputs=[width, height], show_progress=False)
         i2iFromGallery.click (fn=i2iImageFromGallery, inputs=[output_gallery], outputs=[i2iSource])
-        i2iCaption.click (fn=i2iMakeCaptions, inputs=[i2iSource, positive_prompt], outputs=[positive_prompt])#outputs=[positive_prompt]
+        i2iCaption.click (fn=i2iMakeCaptions, inputs=[i2iSource, positive_prompt], outputs=[positive_prompt])
         toPrompt.click(toggleC2P, inputs=[], outputs=[toPrompt])
 
-        output_gallery.select (fn=getGalleryIndex, inputs=[], outputs=[])
+        output_gallery.select (fn=getGalleryIndex, inputs=[output_gallery], outputs=[image_infotext])
 
         generate_button.click(predict, inputs=ctrls, outputs=[generate_button, SP, output_gallery]).then(fn=lambda: gradio.update(value='Generate', variant='primary', interactive=True), inputs=None, outputs=generate_button)
         generate_button.click(toggleGenerate, inputs=[initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA], outputs=[generate_button, SP])

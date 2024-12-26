@@ -50,6 +50,9 @@ I can generate using all models, though the 2K Sigma model is very slow on my li
 <details>
 <summary>Change log</summary>
 
+#### 26/12/2024 ####
+* fixes for gallery, sending to i2i
+
 #### 22/08/2024 ####
 * added Perturbed-attention guidance. It's not compatible with CFG cutoff. Using PAG therefore forces CFG cutoff to 1.0 (i.e. no cutoff). Needs diffusers >= 0.30.0
 * minor UI tweaks to work better in Forge2

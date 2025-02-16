@@ -320,10 +320,13 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline, PAGMixin):
                 t = t.split(':')
                 if len(t) == 1:
                     weight = 1.0
-                elif t[1] == '':
+                elif t[0] == '' or t[1] == '':
                     weight = 1.0
                 else:
-                    weight = float(t[1])
+                    try:
+                        weight = float(t[1])
+                    except:
+                        weight = 1.0
 
                 text_inputsX = tokenizer(
                     t[0],

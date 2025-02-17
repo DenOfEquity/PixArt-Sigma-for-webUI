@@ -635,7 +635,7 @@ class PixArtPipeline_DoE_combined(DiffusionPipeline, PAGMixin):
                     init_latents_proper = self.scheduler.add_noise(image_latents, noise, ts)
                     latents = (init_latents_proper * ~tmask) + (latents * tmask)
 
-                if float((i+1) / num_timesteps) > guidance_cutoff and guidance_scale != 1.0 and PAG_scale == 0.0:
+                if float((i+1) / num_timesteps) > guidance_cutoff and guidance_scale != 1.0 and pag_scale == 0.0:
                     do_classifier_free_guidance = False
                     guidance_scale = 1.0
                     components_multipler -= 1

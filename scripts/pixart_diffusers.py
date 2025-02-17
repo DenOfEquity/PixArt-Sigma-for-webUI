@@ -755,8 +755,11 @@ def on_ui_tabs():
     defaultHeight = models.defaultHeight
 
     def buildModelList ():
-        custom = [name for name in os.listdir(".//models//diffusers//PixArtCustom") if os.path.isdir(os.path.join(".//models//diffusers//PixArtCustom", name))]
-        models_list = models.models_list_alpha + models.models_list_sigma + custom
+        try:
+            custom = [name for name in os.listdir(".//models//diffusers//PixArtCustom") if os.path.isdir(os.path.join(".//models//diffusers//PixArtCustom", name))]
+            models_list = models.models_list_alpha + models.models_list_sigma + custom
+        except:
+            models_list = models.models_list_alpha + models.models_list_sigma
 
         return models_list
 

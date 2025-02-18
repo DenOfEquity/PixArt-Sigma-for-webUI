@@ -53,7 +53,7 @@ I can generate using all models, though the 2K Sigma model is very slow on my li
 #### 16/02/2025 ####
 * some UI tweaks
 * ForgeCanvas for image2image, for Forge2 users
-* added some support for custom models. They must be diffusers format. In `{webui directory}\models\diffusers` create a subdirectory `PixArtCustom`. In that directory, create a subdirectory for the custom model; the directory name will be used as the display name in the menu. Inside each of those should be the transformer file (*diffusion_pytorch_model.safetensors*) and its `config.json`. Ideally, include the model size in the name, 256/512/1024/2K.
+* added some support for custom models. They must be diffusers format. In `{webui directory}\models\diffusers` create a subdirectory `PixArtCustom`. In that directory, create a subdirectory for the custom model; the directory name will be used as the display name in the menu. Ideally, include the model size in the directory name, 256/512/1024/2K - for example `animetune_512`. Inside each of those should be the transformer file (*diffusion_pytorch_model.safetensors*) and its `config.json`.
 
 #### 26/12/2024 ####
 * fixes for gallery, sending to i2i

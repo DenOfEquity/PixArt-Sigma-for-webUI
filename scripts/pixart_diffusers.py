@@ -262,8 +262,8 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
         else:                               #   will delete model after use
             device_map = 'auto'
 
+        print ("PixArt: loading T5 ...", end="\r", flush=True)
         try:                                #   self converted fp16 T5
-            print ("PixArt: loading T5 ...", end="\r", flush=True)
             PixArtStorage.pipeTE.text_encoder = T5EncoderModel.from_pretrained(
                 './/models//diffusers//pixart_T5_fp16',
                 variant='fp16',
@@ -274,14 +274,6 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
                 use_safetensors=True
             )
         except:
-            # PixArtStorage.pipeTE.text_encoder = T5EncoderModel.from_pretrained(
-                # "Lightricks/T5-XXL-8bit",
-                # local_files_only=False,
-                # device_map=device_map,
-                # torch_dtype=torch.float16,
-                # low_cpu_mem_usage=True,                
-            # )
-
             ##  fetch the T5 model, ~20gigs, load as fp16
             PixArtStorage.pipeTE.text_encoder = T5EncoderModel.from_pretrained(
                 "PixArt-alpha/pixart_sigma_sdxlvae_T5_diffusers",
@@ -697,8 +689,9 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
     if useControlNet != None:
         useControlNet += f" strength: {controlNetStrength}, step range: {controlNetStart}-{controlNetEnd}"
 
+    original_samples_filename_pattern = opts.samples_filename_pattern
+    opts.samples_filename_pattern = "PixArt_[datetime]"
     result = []
-
     total = len(output)
     for i in range (total):
         print (f'PixArt: VAE: {i+1} of {total}', end='\r', flush=True)
@@ -733,6 +726,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
             info
         )
     print ('PixArt: VAE: done  ')
+    opts.samples_filename_pattern = original_samples_filename_pattern
 
 
     if PixArtStorage.noUnload == False:
@@ -746,6 +740,7 @@ def predict(positive_prompt, negative_prompt, model, vae, width, height, guidanc
 
 def on_ui_tabs():
     if PixArtStorage.ModuleReload:
+        reload (styles)
         reload (models)
         reload (pipeline)
     
@@ -1282,7 +1277,6 @@ def on_ui_tabs():
         swapper.click(lambda w, h: (h, w), inputs=[width, height], outputs=[width, height], show_progress=False)
         random.click(toggleRandom, inputs=None, outputs=random, show_progress=False)
         AS.click(toggleAS, inputs=None, outputs=AS)
-
         toPrompt.click(toggleC2P, inputs=None, outputs=[toPrompt])
 
         output_gallery.select(fn=getGalleryIndex, js="selected_gallery_index", inputs=gallery_index, outputs=gallery_index, show_progress=False).then(fn=getGalleryText, inputs=[output_gallery, gallery_index, base_seed], outputs=[infotext, sampling_seed], show_progress=False)

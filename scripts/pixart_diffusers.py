@@ -794,7 +794,7 @@ def on_ui_tabs():
         prompts = ['<MORE_DETAILED_CAPTION>']
 
         for p in prompts:
-            inputs = processor(text=p, images=image, return_tensors="pt")
+            inputs = processor(text=p, images=image.convert("RGB"), return_tensors="pt")
             inputs.to('cuda').to(torch.float16)
             generated_ids = model.generate(
                 input_ids=inputs["input_ids"],

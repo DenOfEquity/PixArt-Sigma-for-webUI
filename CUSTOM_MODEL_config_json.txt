@@ -1,0 +1,43 @@
+here is a sample 'config.json' for custom PixArt transformers, if the model is not supplied with one
+
+each custom model is placed in '/models/diffusers/PixArtCustom/{model name}'
+    use unique directories for each model
+the transformer file must be called 'diffusion_pytorch_model.safetensors'
+each transformer file must have an appropriate 'config.json' in the same directory
+
+there are 3 lines that need edits based on the model:
+1. interpolation_scale -> 0.5 for 256px models; 1 for 512px; 2 for 1024px; 4 for 2K models
+2. num_layers          -> 28 for 600M models, 42 for 900M models
+3. sample_size         -> 32 for 256px models; 64 for 512px; 128 for 1024px; 256 for 2K models
+
+----- config.json begins -----
+{
+  "_class_name": "PixArtTransformer2DModel",
+  "_diffusers_version": "0.30.0.dev0",
+  "activation_fn": "gelu-approximate",
+  "attention_bias": true,
+  "attention_head_dim": 72,
+  "attention_type": "default",
+  "caption_channels": 4096,
+  "cross_attention_dim": 1152,
+  "double_self_attention": false,
+  "dropout": 0.0,
+  "in_channels": 4,
+  "interpolation_scale": 2,
+  "norm_elementwise_affine": false,
+  "norm_eps": 1e-06,
+  "norm_num_groups": 32,
+  "norm_type": "ada_norm_single",
+  "num_attention_heads": 16,
+  "num_embeds_ada_norm": 1000,
+  "num_layers": 28,
+  "num_vector_embeds": null,
+  "only_cross_attention": false,
+  "out_channels": 8,
+  "patch_size": 2,
+  "sample_size": 128,
+  "upcast_attention": false,
+  "use_additional_conditions": false,
+  "use_linear_projection": false
+}
+----- config.json ends -----
